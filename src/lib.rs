@@ -2,6 +2,7 @@
 //!
 //! A interface de terminal (`tui`) e os subcomandos da CLI usam esta biblioteca; nada aqui depende da interface.
 
+pub mod bench;
 pub mod bottleneck;
 pub mod diag;
 pub mod gpu;

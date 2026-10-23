@@ -4,7 +4,6 @@
 //! * AMD: arquivos do driver `amdgpu` em /sys (uso, VRAM, hwmon, clocks DPM).
 //! * Intel: frequência pelo i915/xe.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
