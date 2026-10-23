@@ -10,5 +10,6 @@ pub mod pci;
 pub mod sensors;
 pub mod settings;
 pub mod storage;
+pub mod stress;
 pub mod sysinfo;
 pub mod util;
