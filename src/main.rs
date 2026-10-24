@@ -1,3 +1,9 @@
+use clap::Parser;
+
 fn main() {
-    println!("resetexplode");
+    let cli = resetexplode::cli::Cli::parse();
+    if let Err(e) = resetexplode::cli::run(cli) {
+        eprintln!("erro: {e:#}");
+        std::process::exit(1);
+    }
 }
