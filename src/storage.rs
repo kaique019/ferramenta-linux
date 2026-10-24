@@ -517,7 +517,9 @@ pub fn collect_disks(r: &Roots, with_smart: bool) -> Vec<Disk> {
             if m.is_empty() { dev_attr(&d, "device/name") } else { m }
         };
         let vendor = dev_attr(&d, "device/vendor");
-        let model = if !vendor.is_empty() && vendor != "ATA" && !model.starts_with(&vendor) { format!("{vendor} {model}") } else { model };
+        // Em dispositivos virtio o "vendor" é só um código (0x1af4) e não há modelo: nesses casos não vira título.
+        let vendor_is_name = !vendor.is_empty() && vendor != "ATA" && !vendor.starts_with("0x");
+        let model = if vendor_is_name && !model.is_empty() && !model.starts_with(&vendor) { format!("{vendor} {model}") } else { model };
         let firmware = {
             let f = dev_attr(&d, "device/firmware_rev");
             if f.is_empty() { dev_attr(&d, "device/rev") } else { f }
@@ -788,6 +790,17 @@ mod tests {
         let sda = &disks[1];
         assert_eq!(sda.model, "WD Elements 25A3");
         assert_eq!(sda.kind(), "HDD");
+    }
+
+    #[test]
+    fn virtio_disk_without_model_is_not_titled_by_vendor_code() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "sys/block/vda/size", "2048\n");
+        write(d.path(), "sys/block/vda/device/vendor", "0x1af4\n");
+        let disks = collect_disks(&Roots::under(d.path()), false);
+        assert_eq!(disks.len(), 1);
+        assert!(!disks[0].model.contains("0x1af4"), "modelo: {:?}", disks[0].model);
+        assert!(!disks[0].title().contains("0x1af4"), "título: {:?}", disks[0].title());
     }
 
     #[test]
