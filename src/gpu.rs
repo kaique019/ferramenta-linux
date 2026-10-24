@@ -524,6 +524,7 @@ mod tests {
     }
 
     fn write(root: &Path, rel: &str, content: &str) {
+        use std::fs;
         let p = root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, content).unwrap();
