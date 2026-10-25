@@ -509,8 +509,8 @@ fn event_loop(app: &mut App, rx: &Receiver<Msg>) -> io::Result<()> {
             if app.quit {
                 return Ok(());
             }
-            if event::poll(Duration::from_millis(100))? {
-                if let Event::Key(k) = event::read()? {
+            if event::poll(Duration::from_millis(100))?
+                && let Event::Key(k) = event::read()? {
                     match app.on_key(k) {
                         Effect::Quit => return Ok(()),
                         Effect::Launch(req) => {
@@ -520,7 +520,6 @@ fn event_loop(app: &mut App, rx: &Receiver<Msg>) -> io::Result<()> {
                         Effect::None => {}
                     }
                 }
-            }
         }
     })();
     ratatui::restore();

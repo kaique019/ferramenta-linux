@@ -112,7 +112,7 @@ pub fn diagnose(ports: &[SerialPort], f: &Facts) -> Vec<Advice> {
     if !blocked.is_empty() && !f.is_root {
         let groups: Vec<String> = blocked.iter().filter_map(|p| p.group.clone()).collect();
         let group = groups.first().cloned().unwrap_or_else(|| "dialout".into());
-        let member = f.user_groups.iter().any(|g| *g == group);
+        let member = f.user_groups.contains(&group);
         v.push(if member {
             Advice { problem: format!("Você está no grupo {group}, mas a sessão ainda não aplicou"), fix: "Saia e entre de novo na sessão (ou reinicie) e tente outra vez.".into() }
         } else {

@@ -119,7 +119,7 @@ fn simulate(v: &View, i: usize) -> (f32, f32, f32, f32, f32) {
                 }
                 let (dx, dy) = (v.x[j] - x, v.y[j] - y);
                 let d2 = dx * dx + dy * dy;
-                if d2 > RADIUS * RADIUS || d2 < 1e-6 {
+                if !(1e-6..=RADIUS * RADIUS).contains(&d2) {
                     continue;
                 }
                 let inv = 1.0 / d2.sqrt();

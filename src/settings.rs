@@ -285,11 +285,10 @@ impl SettingsStore {
 
     pub fn save(&self, s: &Settings) -> io::Result<()> {
         let json = serde_json::to_vec_pretty(s).map_err(io::Error::other)?;
-        if self.path.exists() {
-            if let Err(e) = fs::copy(&self.path, self.suffixed(".bak")) {
+        if self.path.exists()
+            && let Err(e) = fs::copy(&self.path, self.suffixed(".bak")) {
                 diag::warn("settings", format!("Não consegui criar a cópia .bak das configurações: {e}"));
             }
-        }
         write_atomic_mode(&self.path, &json, 0o600)
     }
 

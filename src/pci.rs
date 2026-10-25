@@ -241,11 +241,10 @@ fn split_quoted(line: &str) -> Vec<String> {
 
 /// Fabricante abreviado: "NVIDIA Corporation" -> "NVIDIA".
 pub fn short_vendor(name: &str) -> String {
-    if let Some(b) = bracket_content(name) {
-        if let Some(first) = b.split('/').next() {
+    if let Some(b) = bracket_content(name)
+        && let Some(first) = b.split('/').next() {
             return first.trim().to_string();
         }
-    }
     let n = name.trim();
     for suffix in [" Corporation", " Corp.", ", Inc.", " Inc.", " Co., Ltd.", " Technologies"] {
         if let Some(s) = n.strip_suffix(suffix) {

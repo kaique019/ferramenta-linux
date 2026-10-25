@@ -176,11 +176,10 @@ pub fn assess(d: &SmartData) -> (Verdict, Vec<String>) {
         }
         crit.push(format!("O NVMe reporta alerta crítico: {}.", bits.join(", ")));
     }
-    if let (Some(s), Some(t)) = (d.spare_pct, d.spare_threshold) {
-        if s < t {
+    if let (Some(s), Some(t)) = (d.spare_pct, d.spare_threshold)
+        && s < t {
             crit.push(format!("A reserva de células do SSD ({s:.0}%) está abaixo do limite do fabricante ({t:.0}%)."));
         }
-    }
     if let Some(w) = d.wear_pct {
         if w >= 95.0 {
             crit.push(format!("Desgaste de {w:.0}%: o SSD está no fim da vida útil. Troque e faça backup."));
@@ -291,11 +290,10 @@ pub fn read_smart(dev: &str, usb: bool) -> Result<SmartData, String> {
     let mut d = attempt(&[])?;
     if !d.has_data() && usb {
         // Pontes USB-SATA costumam precisar do modo SAT
-        if let Ok(d2) = attempt(&["-d", "sat"]) {
-            if d2.has_data() {
+        if let Ok(d2) = attempt(&["-d", "sat"])
+            && d2.has_data() {
                 d = d2;
             }
-        }
     }
     if !d.has_data() {
         let why = d.messages.iter().find(|m| m.to_lowercase().contains("permission")).cloned();
@@ -434,7 +432,7 @@ pub fn unescape_mount(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() + 0 && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+        if b[i] == b'\\' && i + 3 < b.len() && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
             let v = (b[i + 1] - b'0') as u32 * 64 + (b[i + 2] - b'0') as u32 * 8 + (b[i + 3] - b'0') as u32;
             out.push(v as u8);
             i += 4;

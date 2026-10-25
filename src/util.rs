@@ -327,13 +327,11 @@ pub fn home_dir() -> PathBuf {
 }
 
 fn xdg_dir(var: &str, default_rel: &str) -> PathBuf {
-    if !User::is_switched() {
-        if let Some(p) = std::env::var_os(var).map(PathBuf::from) {
-            if p.is_absolute() {
+    if !User::is_switched()
+        && let Some(p) = std::env::var_os(var).map(PathBuf::from)
+            && p.is_absolute() {
                 return p;
             }
-        }
-    }
     home_dir().join(default_rel)
 }
 

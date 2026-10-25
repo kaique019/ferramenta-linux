@@ -45,13 +45,11 @@ pub fn parse_desktop(text: &str) -> Vec<(String, String)> {
         let l = l.trim();
         if l.starts_with('[') {
             in_entry = l == "[Desktop Entry]";
-        } else if in_entry && !l.starts_with('#') {
-            if let Some((k, val)) = l.split_once('=') {
-                if !k.contains('[') {
+        } else if in_entry && !l.starts_with('#')
+            && let Some((k, val)) = l.split_once('=')
+                && !k.contains('[') {
                     v.push((k.trim().to_string(), val.trim().to_string()));
                 }
-            }
-        }
     }
     v
 }
@@ -84,14 +82,13 @@ pub fn list(d: &Dirs) -> Vec<AutostartEntry> {
         let mut ps: Vec<_> = fs::read_dir(dir).map(|r| r.filter_map(|e| e.ok()).map(|e| e.path()).collect()).unwrap_or_default();
         ps.sort();
         for p in ps {
-            if let Some(e) = read_entry(&p, true) {
-                if !out.iter().any(|o| o.file == e.file) {
+            if let Some(e) = read_entry(&p, true)
+                && !out.iter().any(|o| o.file == e.file) {
                     out.push(e);
                 }
-            }
         }
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_key(|a| a.name.to_lowercase());
     out
 }
 

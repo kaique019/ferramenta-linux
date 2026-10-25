@@ -187,11 +187,10 @@ pub fn scan_text(text: &str, since_unix: Option<i64>) -> HardwareErrors {
     let mut e = HardwareErrors::default();
     for line in text.lines() {
         let (ts, msg) = split_log_line(line);
-        if let (Some(since), Some(t)) = (since_unix, ts) {
-            if t < since {
+        if let (Some(since), Some(t)) = (since_unix, ts)
+            && t < since {
                 continue;
             }
-        }
         if let Some(k) = classify_line(msg) {
             e.add(k);
             e.last_detail = Some(format!("{} · {}", k.title(), trunc(msg.trim(), 140)));

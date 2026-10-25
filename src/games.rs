@@ -56,11 +56,10 @@ fn steam_roots(home: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     for rel in [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam", ".steam/root"] {
         let p = home.join(rel);
-        if let Ok(c) = fs::canonicalize(&p) {
-            if c.join("steamapps").is_dir() && seen.insert(c.clone()) {
+        if let Ok(c) = fs::canonicalize(&p)
+            && c.join("steamapps").is_dir() && seen.insert(c.clone()) {
                 out.push(c);
             }
-        }
     }
     out
 }
@@ -77,17 +76,15 @@ pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
     };
     for root in steam_roots(home) {
         add(root.join("steamapps"), &mut out);
-        if let Ok(text) = fs::read_to_string(root.join("steamapps/libraryfolders.vdf")) {
-            if let Ok(v) = vdf::parse(&text) {
-                if let Some(lf) = v.get("libraryfolders") {
+        if let Ok(text) = fs::read_to_string(root.join("steamapps/libraryfolders.vdf"))
+            && let Ok(v) = vdf::parse(&text)
+                && let Some(lf) = v.get("libraryfolders") {
                     for (_, entry) in lf.entries() {
                         if let Some(path) = entry.get_str("path") {
                             add(Path::new(path).join("steamapps"), &mut out);
                         }
                     }
                 }
-            }
-        }
     }
     out
 }
@@ -154,8 +151,8 @@ pub fn heroic_games(home: &Path) -> Vec<Game> {
         // Avulsos: { games: [ { app_name, title, folder_name, install: { executable } } ] }
         if let Some(list) = json_file(&base.join("sideload_apps/library.json")).and_then(|v| v.get("games").cloned()).and_then(|v| v.as_array().cloned()) {
             for g in &list {
-                let Some(app) = s(&g, "app_name") else { continue };
-                games.push(Game { id: format!("heroic:{app}"), name: s(&g, "title").unwrap_or_else(|| app.clone()), source: Source::Heroic, install_dir: s(&g, "folder_name"), exe: g.get("install").and_then(|i| s(i, "executable")), size: None, steam_appid: None });
+                let Some(app) = s(g, "app_name") else { continue };
+                games.push(Game { id: format!("heroic:{app}"), name: s(g, "title").unwrap_or_else(|| app.clone()), source: Source::Heroic, install_dir: s(g, "folder_name"), exe: g.get("install").and_then(|i| s(i, "executable")), size: None, steam_appid: None });
             }
         }
     }
@@ -171,11 +168,10 @@ fn lutris_game(slug: &str, text: &str) -> Option<Game> {
             if let Some(v) = line.strip_prefix("name:") {
                 name = Some(v.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
             }
-        } else if in_game {
-            if let Some(v) = line.trim().strip_prefix("exe:") {
+        } else if in_game
+            && let Some(v) = line.trim().strip_prefix("exe:") {
                 exe = Some(v.trim().trim_matches(|c| c == '"' || c == '\'').to_string());
             }
-        }
     }
     let exe = exe.filter(|e| !e.is_empty());
     Some(Game { id: format!("lutris:{slug}"), name: name.filter(|n| !n.is_empty()).unwrap_or_else(|| slug.to_string()), source: Source::Lutris, install_dir: exe.as_ref().and_then(|e| Path::new(e).parent().map(|p| p.to_string_lossy().into_owned())), exe, size: None, steam_appid: None })
@@ -186,11 +182,10 @@ pub fn lutris_games(home: &Path) -> Vec<Game> {
     for rel in [".local/share/lutris/games", ".var/app/net.lutris.Lutris/data/lutris/games"] {
         let dir = home.join(rel);
         for f in dir_names(&dir) {
-            if let Some(slug) = f.strip_suffix(".yml") {
-                if let Some(g) = fs::read_to_string(dir.join(&f)).ok().and_then(|t| lutris_game(slug, &t)) {
+            if let Some(slug) = f.strip_suffix(".yml")
+                && let Some(g) = fs::read_to_string(dir.join(&f)).ok().and_then(|t| lutris_game(slug, &t)) {
                     out.push(g);
                 }
-            }
         }
     }
     out
