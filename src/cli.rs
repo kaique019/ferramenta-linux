@@ -10,7 +10,8 @@ use serde::Serialize;
 
 use crate::bench::{disk, memory, render, sim};
 use crate::util::{Cancel, Roots, fmt_bytes, fmt_duration};
-use crate::{gpu, hwerrors, network, pci, power, sensors, storage, stress, sysinfo};
+use crate::settings::{OverlayConfig, SettingsStore};
+use crate::{autostart, gpu, hwerrors, installer, network, occheck, overlay, pci, power, sensors, serial, storage, stress, sysinfo, tweaks};
 
 #[derive(Parser, Debug)]
 #[command(name = "resetexplode", version, about = "RESET EXPLODE para Linux: informações, sensores, benchmarks e stress")]
@@ -74,6 +75,46 @@ pub enum Command {
         #[arg(long)]
         minutes: Option<u64>,
     },
+    /// Programas de inicialização (desativar com backup e restaurar)
+    Startup {
+        #[command(subcommand)]
+        action: StartupAction,
+    },
+    /// Ajustes de sistema para jogos (com restauração)
+    Tweaks {
+        #[command(subcommand)]
+        action: TweakAction,
+    },
+    /// Portas seriais USB e diagnóstico (dialout, brltty, ModemManager)
+    Serial,
+    /// Instala utilitários (MangoHud, GameMode, lm-sensors...) pelo gerenciador da distro
+    Install {
+        /// Programa do catálogo; sem isso, lista o catálogo
+        id: Option<String>,
+    },
+    /// Overlay de FPS (MangoHud): mostra ou grava a configuração
+    Overlay {
+        /// Canto: TL, TR, BL ou BR
+        #[arg(long, value_parser = ["TL", "TR", "BL", "BR"])]
+        corner: Option<String>,
+        /// Escala do texto (0,5 a 3)
+        #[arg(long)]
+        scale: Option<f64>,
+        /// Itens separados por vírgula (ex.: fps,cpu_temp,gpu_load)
+        #[arg(long)]
+        items: Option<String>,
+        /// Grava em ~/.config/MangoHud/MangoHud.conf
+        #[arg(long)]
+        write: bool,
+    },
+    /// Verificador de estabilidade (overclock/undervolt): estressa CPU+RAM e confere erros do kernel
+    Oc {
+        /// Duração em minutos
+        #[arg(long, default_value_t = 10.0)]
+        minutes: f64,
+        #[arg(long, default_value_t = 90.0)]
+        max_temp: f64,
+    },
     /// Benchmarks
     Bench {
         #[command(subcommand)]
@@ -97,6 +138,28 @@ pub enum Command {
         #[arg(long, default_value_t = 90.0)]
         max_temp: f64,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StartupAction {
+    /// Lista os programas que iniciam com a sessão
+    List,
+    /// Desativa (guarda backup)
+    Disable { file: String },
+    /// Lista os desativados por aqui
+    Removed,
+    /// Restaura um desativado (nome ou arquivo); sem argumento, restaura todos
+    Restore { name: Option<String> },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TweakAction {
+    /// Mostra o estado de cada ajuste
+    List,
+    /// Aplica o valor recomendado (vale até reiniciar)
+    Apply { id: String },
+    /// Devolve o valor original
+    Restore { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -289,6 +352,95 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("CPU: governador {} ({}) · EPP {} · boost {} · perfil {}", opt(&c.governor, ""), c.governors.join("/"), opt(&c.epp, ""), c.boost.map(|b| if b { "ligado" } else { "desligado" }).unwrap_or("—"), opt(&c.platform_profile, ""));
             Ok(())
         }
+        Some(Command::Startup { action }) => startup(action, json),
+        Some(Command::Tweaks { action }) => tweak_cmd(&roots, action, json),
+        Some(Command::Serial) => {
+            let ports = serial::list(&roots);
+            let advice = serial::diagnose(&ports, &serial::gather_facts());
+            if json {
+                #[derive(Serialize)]
+                struct Out<'a> {
+                    ports: &'a [serial::SerialPort],
+                    advice: &'a [serial::Advice],
+                }
+                return print_json(&Out { ports: &ports, advice: &advice });
+            }
+            for p in &ports {
+                println!("{} · {} {} · {}{}", p.device, opt(&p.vendor_id, ""), opt(&p.product_id, ""), p.product.as_deref().unwrap_or("?"), if p.accessible { "" } else { " · SEM ACESSO" });
+            }
+            for a in &advice {
+                println!("\n! {}\n  → {}", a.problem, a.fix);
+            }
+            Ok(())
+        }
+        Some(Command::Install { id: None }) => {
+            let c = installer::catalog();
+            if json {
+                return print_json(&c);
+            }
+            println!("Gerenciador: {}", installer::detect(&roots).map(|p| p.name()).unwrap_or("não reconhecido"));
+            for a in c {
+                println!("{:<14} {} {}", a.id, if a.installed { "[instalado]" } else { "[ausente]  " }, a.title);
+            }
+            Ok(())
+        }
+        Some(Command::Install { id: Some(id) }) => {
+            installer::install(&roots, &id).map_err(anyhow::Error::msg)?;
+            println!("{id} instalado.");
+            Ok(())
+        }
+        Some(Command::Overlay { corner, scale, items, write }) => {
+            let store = SettingsStore::default_location();
+            let mut cfg = store.load().settings.overlay;
+            if let Some(c) = corner {
+                cfg.corner = c;
+            }
+            if let Some(sc) = scale {
+                cfg.scale = sc;
+            }
+            if let Some(i) = items {
+                let list: Vec<String> = i.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                if let Some(bad) = list.iter().find(|k| !overlay::METRICS.iter().any(|(key, _, _)| key == k)) {
+                    bail!("item desconhecido: {bad} (opções: {})", overlay::METRICS.iter().map(|(k, _, _)| *k).collect::<Vec<_>>().join(", "));
+                }
+                cfg.items = Some(list);
+            }
+            save_overlay(&store, &cfg)?;
+            if write {
+                let path = overlay::default_path();
+                overlay::write(&cfg, &path).map_err(anyhow::Error::msg)?;
+                println!("Gravado em {}", path.display());
+            } else {
+                print!("{}", overlay::generate(&cfg));
+            }
+            Ok(())
+        }
+        Some(Command::Oc { minutes, max_temp }) => {
+            if !(minutes > 0.0 && minutes <= 240.0) {
+                bail!("--minutes deve ficar entre 0 e 240");
+            }
+            let cancel = cancel_on_ctrl_c();
+            let cfg = stress::StressConfig { cpu: true, ram: true, max_temp, duration: Duration::from_secs_f64(minutes * 60.0), ..Default::default() };
+            let o = occheck::run(&cfg, &cancel, &|s| {
+                if !json {
+                    eprintln!("  {:>5.0}s  temp {:>7}  carga {:>7}  erros RAM {}", s.t, opt(&s.cpu_temp.map(|v| format!("{v:.0}")), "°C"), opt(&s.cpu_load.map(|v| format!("{v:.0}")), "%"), s.mem_errors);
+                }
+            });
+            let _ = SettingsStore::default_location().update(|st| st.push_oc_record(o.record()));
+            if json {
+                #[derive(Serialize)]
+                struct Out<'a> {
+                    verdict: &'a str,
+                    summary: &'a str,
+                    report: &'a stress::StressReport,
+                    errors: &'a hwerrors::HardwareErrors,
+                }
+                print_json(&Out { verdict: o.verdict.label(), summary: &o.summary, report: &o.report, errors: &o.errors })?;
+            } else {
+                println!("\nVeredito: {} — {}", o.verdict.label(), o.summary);
+            }
+            if matches!(o.verdict, occheck::OcVerdict::Stable | occheck::OcVerdict::StableWithWarnings) { Ok(()) } else { std::process::exit(2) }
+        }
         Some(Command::Net { test, host, url, secs }) => net(&roots, json, test, &host, &url, secs),
         Some(Command::Errors { minutes }) => {
             let since = minutes.map(|m| {
@@ -330,6 +482,96 @@ pub fn run(cli: Cli) -> Result<()> {
             if rep.passed() { Ok(()) } else { std::process::exit(2) }
         }
     }
+}
+
+fn save_overlay(store: &SettingsStore, cfg: &OverlayConfig) -> Result<()> {
+    store.update(|s| s.overlay = cfg.clone()).context("não consegui salvar as configurações")
+}
+
+/// "discord", "Discord" e "discord.desktop" apontam para o mesmo item.
+fn backup_matches(b: &crate::settings::StartupBackup, wanted: &str) -> bool {
+    let w = wanted.to_lowercase();
+    let w = w.strip_suffix(".desktop").unwrap_or(&w);
+    let file = b.original.rsplit('/').next().unwrap_or("").to_lowercase();
+    b.name.to_lowercase() == w || file.strip_suffix(".desktop").unwrap_or(&file) == w
+}
+
+fn startup(action: StartupAction, json: bool) -> Result<()> {
+    let dirs = autostart::Dirs::system_default();
+    let store = SettingsStore::default_location();
+    match action {
+        StartupAction::List => {
+            let l = autostart::list(&dirs);
+            if json {
+                return print_json(&l);
+            }
+            for e in &l {
+                println!("{:<34} {:<9} {} {}", e.file, if e.enabled { "ativo" } else { "desativado" }, if e.system { "(sistema)" } else { "" }, e.exec);
+            }
+        }
+        StartupAction::Disable { file } => {
+            let b = autostart::disable(&dirs, &file).map_err(anyhow::Error::msg)?;
+            store.update(|s| s.startup_removed.push(b.clone())).context("não consegui salvar o registro de backup")?;
+            println!("Desativado: {} (backup guardado; restaure com `startup restore`)", b.name);
+        }
+        StartupAction::Removed => {
+            let r = store.load().settings.startup_removed;
+            if json {
+                return print_json(&r);
+            }
+            for b in &r {
+                println!("{} — {}", b.name, b.original);
+            }
+        }
+        StartupAction::Restore { name } => {
+            let all = store.load().settings.startup_removed;
+            let wanted: Vec<_> = all.iter().filter(|b| name.as_ref().is_none_or(|n| backup_matches(b, n))).cloned().collect();
+            if wanted.is_empty() {
+                bail!("nada para restaurar{}", name.map(|n| format!(" com o nome {n}")).unwrap_or_default());
+            }
+            let mut ok = vec![];
+            for b in &wanted {
+                match autostart::restore(b) {
+                    Ok(()) => {
+                        println!("Restaurado: {}", b.name);
+                        ok.push(b.original.clone());
+                    }
+                    Err(e) => eprintln!("Falhou ({}): {e}", b.name),
+                }
+            }
+            store.update(|s| s.startup_removed.retain(|b| !ok.contains(&b.original))).context("não consegui atualizar o registro")?;
+            if ok.len() < wanted.len() {
+                bail!("{} item(ns) não foram restaurados", wanted.len() - ok.len());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tweak_cmd(roots: &Roots, action: TweakAction, json: bool) -> Result<()> {
+    let store = SettingsStore::default_location();
+    match action {
+        TweakAction::List => {
+            let st = tweaks::status(roots, &store.load().settings.tweak_backup);
+            if json {
+                return print_json(&st);
+            }
+            for t in &st {
+                println!("{:<20} atual {:<10} recomendado {:<8} {}{}", t.id, t.current.as_deref().unwrap_or("—"), t.recommended, if t.applied { "[aplicado]" } else if !t.available { "[indisponível]" } else { "" }, if t.can_restore { " [restaurável]" } else { "" });
+            }
+        }
+        TweakAction::Apply { id } => {
+            let res = store.update(|s| tweaks::apply(roots, &mut s.tweak_backup, &id)).context("não consegui salvar o backup")?;
+            res.map_err(anyhow::Error::msg)?;
+            println!("{id} aplicado (vale até reiniciar; desfaça com `tweaks restore {id}`).");
+        }
+        TweakAction::Restore { id } => {
+            let res = store.update(|s| tweaks::restore(roots, &mut s.tweak_backup, &id)).context("não consegui salvar as configurações")?;
+            res.map_err(anyhow::Error::msg)?;
+            println!("{id} restaurado.");
+        }
+    }
+    Ok(())
 }
 
 fn net(r: &Roots, json: bool, test: bool, host: &str, url: &str, secs: f64) -> Result<()> {
@@ -489,6 +731,13 @@ mod tests {
         assert!(Cli::try_parse_from(["resetexplode", "power", "--boost", "talvez"]).is_err());
         let c = Cli::try_parse_from(["resetexplode", "net", "--test"]).unwrap();
         assert!(matches!(c.command, Some(Command::Net { test: true, .. })));
+    }
+
+    #[test]
+    fn restore_name_matching_is_forgiving_but_exact() {
+        let b = crate::settings::StartupBackup { name: "Discord".into(), original: "/home/u/.config/autostart/discord-ptb.desktop".into(), backup: String::new(), removed_at: 0 };
+        assert!(backup_matches(&b, "discord") && backup_matches(&b, "DISCORD") && backup_matches(&b, "discord-ptb.desktop") && backup_matches(&b, "discord-ptb"));
+        assert!(!backup_matches(&b, "disc") && !backup_matches(&b, "ptb"));
     }
 
     #[test]
