@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::bench::{disk, memory, render, sim};
 use crate::util::{Cancel, Roots, fmt_bytes, fmt_duration};
-use crate::{gpu, hwerrors, pci, sensors, storage, stress, sysinfo};
+use crate::{gpu, hwerrors, network, pci, power, sensors, storage, stress, sysinfo};
 
 #[derive(Parser, Debug)]
 #[command(name = "resetexplode", version, about = "RESET EXPLODE para Linux: informações, sensores, benchmarks e stress")]
@@ -38,6 +38,36 @@ pub enum Command {
     },
     /// Dispositivos PCI
     Pci,
+    /// Bateria, governador da CPU, boost e perfil de energia
+    Power {
+        /// Define o governador (performance, powersave...) — precisa de sudo
+        #[arg(long)]
+        governor: Option<String>,
+        /// Define a preferência energia/desempenho (EPP)
+        #[arg(long)]
+        epp: Option<String>,
+        /// Define o perfil de plataforma (low-power, balanced, performance)
+        #[arg(long)]
+        profile: Option<String>,
+        /// Liga (on) ou desliga (off) o turbo
+        #[arg(long, value_parser = ["on", "off"])]
+        boost: Option<String>,
+    },
+    /// Rede: interfaces, DNS, latência, velocidade e bufferbloat
+    Net {
+        /// Também mede latência, velocidade de download e bufferbloat (usa a internet)
+        #[arg(long)]
+        test: bool,
+        /// Host para a latência
+        #[arg(long, default_value = "1.1.1.1")]
+        host: String,
+        /// URL de download para o teste de velocidade
+        #[arg(long, default_value = "https://speed.cloudflare.com/__down?bytes=200000000")]
+        url: String,
+        /// Duração do teste de velocidade em segundos
+        #[arg(long, default_value_t = 8.0)]
+        secs: f64,
+    },
     /// Erros de hardware no log do kernel
     Errors {
         /// Só ocorrências dos últimos N minutos
@@ -223,6 +253,43 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Some(Command::Power { governor, epp, profile, boost }) => {
+            let mut changed = vec![];
+            if let Some(g) = governor {
+                let n = power::set_governor(&roots, &g).map_err(anyhow::Error::msg)?;
+                changed.push(format!("governador {g} em {n} CPUs"));
+            }
+            if let Some(e) = epp {
+                let n = power::set_epp(&roots, &e).map_err(anyhow::Error::msg)?;
+                changed.push(format!("EPP {e} em {n} CPUs"));
+            }
+            if let Some(p) = profile {
+                power::set_platform_profile(&roots, &p).map_err(anyhow::Error::msg)?;
+                changed.push(format!("perfil {p}"));
+            }
+            if let Some(b) = boost {
+                power::set_boost(&roots, b == "on").map_err(anyhow::Error::msg)?;
+                changed.push(format!("boost {b}"));
+            }
+            let p = power::collect(&roots);
+            if json {
+                return print_json(&p);
+            }
+            for c in &changed {
+                println!("Alterado: {c}");
+            }
+            println!("Tomada: {}", match p.on_ac { Some(true) => "ligada", Some(false) => "desligada (na bateria)", None => "—" });
+            if p.batteries.is_empty() {
+                println!("Sem bateria (desktop).");
+            }
+            for b in &p.batteries {
+                println!("{}: {} · {} · saúde {} · {} ciclos · {}{}", b.name, opt(&b.capacity.map(|v| format!("{v:.0}")), " %"), b.status, opt(&b.health.map(|v| format!("{v:.0}")), " %"), opt(&b.cycles, ""), opt(&b.power_w.map(|v| format!("{v:.1}")), " W"), b.minutes_left.map(|m| format!(" · ~{}", fmt_duration(m * 60))).unwrap_or_default());
+            }
+            let c = &p.cpu;
+            println!("CPU: governador {} ({}) · EPP {} · boost {} · perfil {}", opt(&c.governor, ""), c.governors.join("/"), opt(&c.epp, ""), c.boost.map(|b| if b { "ligado" } else { "desligado" }).unwrap_or("—"), opt(&c.platform_profile, ""));
+            Ok(())
+        }
+        Some(Command::Net { test, host, url, secs }) => net(&roots, json, test, &host, &url, secs),
         Some(Command::Errors { minutes }) => {
             let since = minutes.map(|m| {
                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -263,6 +330,43 @@ pub fn run(cli: Cli) -> Result<()> {
             if rep.passed() { Ok(()) } else { std::process::exit(2) }
         }
     }
+}
+
+fn net(r: &Roots, json: bool, test: bool, host: &str, url: &str, secs: f64) -> Result<()> {
+    #[derive(Serialize)]
+    struct Out {
+        interfaces: Vec<network::Interface>,
+        dns_servers: Vec<String>,
+        dns_ms: Option<f64>,
+        latency: Option<network::LatencyStats>,
+        bufferbloat: Option<network::Bufferbloat>,
+    }
+    let cancel = cancel_on_ctrl_c();
+    let mut out = Out { interfaces: network::interfaces(r), dns_servers: network::dns_servers(r), dns_ms: None, latency: None, bufferbloat: None };
+    if test {
+        out.dns_ms = network::dns_time("example.com");
+        out.latency = Some(network::tcp_latency(host, 443, 10, Duration::from_secs(2), &cancel));
+        out.bufferbloat = Some(network::bufferbloat(host, 443, url, secs, &cancel));
+    }
+    if json {
+        return print_json(&out);
+    }
+    for i in &out.interfaces {
+        println!("{:<10} {:<9} {} {} {}", i.name, i.kind, if i.up { "ativa " } else { "inativa" }, opt(&i.speed_mbps, " Mb/s"), i.driver.as_deref().unwrap_or(""));
+    }
+    println!("DNS: {}", if out.dns_servers.is_empty() { "—".into() } else { out.dns_servers.join(", ") });
+    if let Some(l) = &out.latency {
+        println!("Latência {}: mediana {} · p95 {} · jitter {} · perda {:.0}%", l.target, opt(&l.median_ms.map(|v| format!("{v:.1}")), " ms"), opt(&l.p95_ms.map(|v| format!("{v:.1}")), " ms"), opt(&l.jitter_ms.map(|v| format!("{v:.1}")), " ms"), l.loss_pct);
+        println!("Resolução de DNS: {}", opt(&out.dns_ms.map(|v| format!("{v:.0}")), " ms"));
+    }
+    if let Some(b) = &out.bufferbloat {
+        match &b.download {
+            Some(d) => println!("Download: {:.0} Mb/s", d.mbps),
+            None => println!("Download: falhou (sem internet ou URL bloqueada)"),
+        }
+        println!("Bufferbloat: nota {} (latência sobe {} sob carga)", b.grade, opt(&b.added_ms.map(|v| format!("{v:.0}")), " ms"));
+    }
+    Ok(())
 }
 
 fn info(r: &Roots, json: bool) -> Result<()> {
@@ -376,6 +480,15 @@ mod tests {
         let c = Cli::try_parse_from(["resetexplode", "--json", "bench", "disk", "--mb", "64", "--secs", "0.5"]).unwrap();
         assert!(c.json);
         assert!(matches!(c.command, Some(Command::Bench { which: Bench::Disk { mb: 64, .. } })));
+    }
+
+    #[test]
+    fn parses_power_and_net() {
+        let c = Cli::try_parse_from(["resetexplode", "power", "--governor", "performance", "--boost", "off"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Power { governor: Some(_), boost: Some(_), .. })));
+        assert!(Cli::try_parse_from(["resetexplode", "power", "--boost", "talvez"]).is_err());
+        let c = Cli::try_parse_from(["resetexplode", "net", "--test"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Net { test: true, .. })));
     }
 
     #[test]
