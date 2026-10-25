@@ -268,7 +268,8 @@ extern "C" fn on_sigint(_: libc::c_int) {
 }
 
 /// Cancel acionado por Ctrl-C: o teste para limpo (apaga temporários) em vez de ser morto.
-fn cancel_on_ctrl_c() -> Cancel {
+pub fn cancel_on_ctrl_c() -> Cancel {
+    INTERRUPTED.store(false, Ordering::SeqCst);
     let c = Cancel::new();
     // SAFETY: o handler só grava em um AtomicBool, o que é seguro em contexto de sinal.
     unsafe {
@@ -276,7 +277,7 @@ fn cancel_on_ctrl_c() -> Cancel {
     }
     let c2 = c.clone();
     std::thread::spawn(move || {
-        while !c2.is_cancelled() {
+        while !c2.is_cancelled() && !c2.is_orphaned() {
             if INTERRUPTED.load(Ordering::SeqCst) {
                 c2.cancel();
             }
@@ -303,7 +304,7 @@ pub fn run(cli: Cli) -> Result<()> {
     let json = cli.json;
     let roots = Roots::system();
     match cli.command {
-        None => bail!("a interface em terminal (TUI) ainda não está pronta; use um subcomando (veja --help)"),
+        None => crate::tui::run().map_err(|e| anyhow::anyhow!("{e}")),
         Some(Command::Info) => info(&roots, json),
         Some(Command::Sensors) => {
             let r = sensors::read_all(&roots);

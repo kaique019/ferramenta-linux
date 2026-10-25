@@ -24,6 +24,7 @@ pub mod report;
 pub mod serial;
 pub mod stress;
 pub mod sysinfo;
+pub mod tui;
 pub mod tweaks;
 pub mod util;
 pub mod vdf;

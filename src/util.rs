@@ -636,6 +636,10 @@ impl Cancel {
     pub fn cancel(&self) {
         self.0.store(true, AtomicOrdering::SeqCst);
     }
+    /// Ninguém mais além de quem pergunta guarda este sinal (serve para encerrar threads auxiliares).
+    pub fn is_orphaned(&self) -> bool {
+        Arc::strong_count(&self.0) == 1
+    }
     pub fn is_cancelled(&self) -> bool {
         self.0.load(AtomicOrdering::SeqCst)
     }
