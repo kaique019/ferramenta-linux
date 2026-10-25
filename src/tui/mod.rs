@@ -7,6 +7,7 @@
 
 pub mod data;
 pub mod jobs;
+pub mod theme;
 mod ui;
 
 use std::cell::Cell;
@@ -100,6 +101,7 @@ pub struct App {
     pub apps: Vec<installer::AppStatus>,
     pub install: Option<(String, Task<(), Result<(), String>>)>,
     pub status: Option<(Level, String)>,
+    pub theme: theme::Theme,
     pub quit: bool,
 }
 
@@ -137,8 +139,10 @@ impl App {
             apps: vec![],
             install: None,
             status: None,
+            theme: theme::Theme::default(),
             quit: false,
         };
+        app.reload_theme();
         app.reload_games();
         app.reload_tools();
         app
@@ -158,6 +162,16 @@ impl App {
                 }
                 self.live = Some(l);
             }
+        }
+    }
+
+    /// Lê o `theme.json`; se estiver errado, mantém o tema padrão e mostra o motivo.
+    pub fn reload_theme(&mut self) {
+        let (theme, warning) = theme::load(&self.env.theme_path);
+        self.theme = theme;
+        match warning {
+            Some(w) => self.set_status(Level::Err, w),
+            None => self.set_status(Level::Info, format!("tema: {}", self.theme.name)),
         }
     }
 
@@ -285,6 +299,15 @@ impl App {
                 if !self.cancel_job() {
                     self.status = None;
                 }
+                return Effect::None;
+            }
+            KeyCode::Char('t') if !ctrl => {
+                self.theme = self.theme.next_preset();
+                self.set_status(Level::Info, format!("tema: {} (temporário; fixe com `resetexplode theme --preset {} --write`)", self.theme.name, self.theme.name));
+                return Effect::None;
+            }
+            KeyCode::Char('T') => {
+                self.reload_theme();
                 return Effect::None;
             }
             KeyCode::Tab => {
@@ -550,7 +573,7 @@ mod tests {
     use std::path::Path;
 
     fn test_env(d: &Path) -> Env {
-        Env { roots: Roots::under(d), store: SettingsStore::new(d.join("cfg/settings.json")), autostart: autostart::Dirs { user: d.join("as"), system: vec![d.join("sysas")], backup: d.join("bk") }, home: d.join("home") }
+        Env { roots: Roots::under(d), store: SettingsStore::new(d.join("cfg/settings.json")), autostart: autostart::Dirs { user: d.join("as"), system: vec![d.join("sysas")], backup: d.join("bk") }, home: d.join("home"), theme_path: d.join("cfg/theme.json") }
     }
 
     fn put(path: &Path, text: &str) {
@@ -787,6 +810,76 @@ mod tests {
         app.tab = Tab::Ferramentas;
         app.on_key(key(KeyCode::Enter));
         assert!(matches!(app.status, Some((Level::Err, ref s)) if s.contains("não oferece")), "{:?}", app.status);
+    }
+
+    fn fg_of(app: &App, w: u16, h: u16, needle: &str) -> Option<ratatui::style::Color> {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| ui::draw(f, app)).unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in 0..h {
+            let row: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            if let Some(x) = row.join("").find(needle) {
+                let col = row.join("")[..x].chars().count() as u16;
+                return Some(buf[(col, y)].fg);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn theme_file_changes_colors_and_a_broken_one_falls_back_with_a_message() {
+        use ratatui::style::Color;
+        let d = tempfile::tempdir().unwrap();
+        let env = test_env(d.path());
+        // padrão: o rótulo "Kernel" do resumo usa o cinza do tema
+        let app = app_with_data(d.path());
+        assert_eq!(fg_of(&app, 100, 30, "Kernel"), Some(Color::DarkGray));
+        // tema personalizado: o mesmo rótulo passa para a cor do arquivo
+        put(&env.theme_path, r##"{"preset":"padrao","accent":"#ff8800","muted":"#112233","rounded_borders":true}"##);
+        let mut app = app_with_data(d.path());
+        assert_eq!(app.theme.accent, Color::Rgb(255, 136, 0));
+        assert_eq!(app.theme.name, "padrao+");
+        assert_eq!(fg_of(&app, 100, 30, "Kernel"), Some(Color::Rgb(0x11, 0x22, 0x33)));
+        app.tab = Tab::Gpu;
+        let t = text_of(&app, 100, 30);
+        assert!(t.contains('╭'), "bordas arredondadas aplicadas");
+        // arquivo quebrado: tema padrão e aviso na barra de status
+        put(&env.theme_path, r#"{"accent":"vermelho"}"#);
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        assert_eq!(app.theme, theme::Theme::default());
+        assert!(matches!(app.status, Some((Level::Err, ref s)) if s.contains("accent")), "{:?}", app.status);
+        // corrigido: T recarrega
+        put(&env.theme_path, r#"{"preset":"neon"}"#);
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        assert_eq!(app.theme.name, "neon");
+    }
+
+    #[test]
+    fn t_key_cycles_presets_without_touching_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = App::new(test_env(d.path()));
+        let first = app.theme.name.clone();
+        for _ in 0..theme::PRESETS.len() {
+            app.on_key(key(KeyCode::Char('t')));
+        }
+        assert_eq!(app.theme.name, first, "dá a volta");
+        assert!(!app.env.theme_path.exists());
+        app.on_key(key(KeyCode::Char('t')));
+        assert_ne!(app.theme.name, first);
+        let _ = text_of(&app, 100, 30);
+    }
+
+    #[test]
+    fn every_preset_renders_every_tab() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        for p in theme::PRESETS {
+            app.theme = theme::preset(p).unwrap();
+            for tab in TABS {
+                app.tab = tab;
+                let _ = text_of(&app, 90, 28);
+            }
+        }
     }
 
     #[test]

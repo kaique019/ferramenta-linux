@@ -18,11 +18,13 @@ pub struct Env {
     pub store: SettingsStore,
     pub autostart: autostart::Dirs,
     pub home: PathBuf,
+    /// Arquivo do tema (`theme.json`).
+    pub theme_path: PathBuf,
 }
 
 impl Env {
     pub fn system() -> Env {
-        Env { roots: Roots::system(), store: SettingsStore::default_location(), autostart: autostart::Dirs::system_default(), home: crate::util::home_dir() }
+        Env { roots: Roots::system(), store: SettingsStore::default_location(), autostart: autostart::Dirs::system_default(), home: crate::util::home_dir(), theme_path: crate::util::app_config_dir().join("theme.json") }
     }
 }
 

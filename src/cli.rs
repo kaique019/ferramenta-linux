@@ -89,6 +89,21 @@ pub enum Command {
         #[arg(long)]
         smart: bool,
     },
+    /// Tema de cores da TUI (arquivo theme.json): mostra, lista presets ou grava um modelo para editar
+    Theme {
+        /// Lista os presets
+        #[arg(long)]
+        list: bool,
+        /// Preset a mostrar ou gravar (padrao, claro, contraste, retro, neon)
+        #[arg(long)]
+        preset: Option<String>,
+        /// Grava o tema completo em theme.json para você editar
+        #[arg(long)]
+        write: bool,
+        /// Sobrescreve um theme.json existente (guarda .bak)
+        #[arg(long)]
+        force: bool,
+    },
     /// Programas de inicialização (desativar com backup e restaurar)
     Startup {
         #[command(subcommand)]
@@ -427,6 +442,7 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("Relatório gravado em {}", path.display());
             Ok(())
         }
+        Some(Command::Theme { list, preset, write, force }) => theme_cmd(list, preset, write, force),
         Some(Command::Startup { action }) => startup(action, json),
         Some(Command::Tweaks { action }) => tweak_cmd(&roots, action, json),
         Some(Command::Serial) => {
@@ -557,6 +573,48 @@ pub fn run(cli: Cli) -> Result<()> {
             if rep.passed() { Ok(()) } else { std::process::exit(2) }
         }
     }
+}
+
+fn theme_cmd(list: bool, preset: Option<String>, write: bool, force: bool) -> Result<()> {
+    use crate::tui::theme;
+    if list {
+        for p in theme::PRESETS {
+            println!("{p}");
+        }
+        return Ok(());
+    }
+    let path = crate::util::app_config_dir().join("theme.json");
+    let th = match &preset {
+        Some(p) => theme::preset(p).with_context(|| format!("preset desconhecido: {p} (opções: {})", theme::PRESETS.join(", ")))?,
+        None => {
+            let (t, warn) = theme::load(&path);
+            if let Some(w) = warn {
+                eprintln!("aviso: {w}");
+            }
+            t
+        }
+    };
+    let json = serde_json::to_string_pretty(&th.to_file())? + "\n";
+    if !write {
+        eprintln!("Arquivo do tema: {} ({})", path.display(), if path.exists() { "existe" } else { "não existe; usando o padrão" });
+        print!("{json}");
+        return Ok(());
+    }
+    if path.exists() {
+        if !force {
+            bail!("{} já existe; use --force para sobrescrever (a versão atual vira .bak)", path.display());
+        }
+        let bak = path.with_extension("json.bak");
+        std::fs::copy(&path, &bak).with_context(|| format!("não consegui guardar {}", bak.display()))?;
+        crate::util::give_to_user(&bak);
+    }
+    if let Some(dir) = path.parent() {
+        crate::util::create_dir_for_user(dir).with_context(|| format!("não consegui criar {}", dir.display()))?;
+    }
+    crate::util::write_atomic(&path, json.as_bytes()).with_context(|| format!("não consegui gravar {}", path.display()))?;
+    crate::util::give_to_user(&path);
+    println!("Tema {} gravado em {}. Edite as cores e aperte T na TUI para recarregar.", th.name, path.display());
+    Ok(())
 }
 
 fn save_overlay(store: &SettingsStore, cfg: &OverlayConfig) -> Result<()> {
@@ -912,6 +970,12 @@ mod tests {
         assert!(matches!(c.command, Some(Command::Games { action: GameAction::Add { ref args, .. } }) if args == "--base -x"));
         let c = Cli::try_parse_from(["resetexplode", "games", "set", "portal", "--extra", "-novid -console", "--gamemode", "true"]).unwrap();
         assert!(matches!(c.command, Some(Command::Games { action: GameAction::Set { gamemode: Some(true), .. } })));
+    }
+
+    #[test]
+    fn parses_theme_command() {
+        let c = Cli::try_parse_from(["resetexplode", "theme", "--preset", "retro", "--write", "--force"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Theme { write: true, force: true, preset: Some(_), .. })));
     }
 
     #[test]
