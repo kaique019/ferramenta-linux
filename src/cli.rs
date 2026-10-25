@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::bench::{disk, memory, render, sim};
 use crate::util::{Cancel, Roots, fmt_bytes, fmt_duration};
 use crate::settings::{OverlayConfig, SettingsStore};
-use crate::{autostart, gpu, hwerrors, installer, network, occheck, overlay, pci, power, sensors, serial, storage, stress, sysinfo, tweaks};
+use crate::{autostart, games, gpu, launch, report, hwerrors, installer, network, occheck, overlay, pci, power, sensors, serial, storage, stress, sysinfo, tweaks};
 
 #[derive(Parser, Debug)]
 #[command(name = "resetexplode", version, about = "RESET EXPLODE para Linux: informações, sensores, benchmarks e stress")]
@@ -75,6 +75,20 @@ pub enum Command {
         #[arg(long)]
         minutes: Option<u64>,
     },
+    /// Jogos instalados (Steam, Heroic/Epic/GOG, Lutris e manuais) e seus perfis
+    Games {
+        #[command(subcommand)]
+        action: GameAction,
+    },
+    /// Relatório do sistema em HTML (ou JSON com --json)
+    Report {
+        /// Arquivo de saída (padrão: ~/resetexplode-AAAAMMDD.html)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Inclui o SMART dos discos (precisa de sudo)
+        #[arg(long)]
+        smart: bool,
+    },
     /// Programas de inicialização (desativar com backup e restaurar)
     Startup {
         #[command(subcommand)]
@@ -137,6 +151,53 @@ pub enum Command {
         /// Para o teste ao atingir esta temperatura da CPU (°C)
         #[arg(long, default_value_t = 90.0)]
         max_temp: f64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum GameAction {
+    /// Lista os jogos encontrados
+    List,
+    /// Mostra o perfil de um jogo
+    Profile { id: String },
+    /// Altera o perfil (só o que for informado)
+    Set {
+        id: String,
+        #[arg(long, value_parser = ["normal", "above", "high"])]
+        priority: Option<String>,
+        #[arg(long)]
+        gamemode: Option<bool>,
+        #[arg(long)]
+        mangohud: Option<bool>,
+        #[arg(long)]
+        dgpu: Option<bool>,
+        #[arg(long)]
+        performance_governor: Option<bool>,
+        #[arg(long, value_parser = ["source", "unity", "unreal"])]
+        style: Option<String>,
+        /// default, 1280x720, 1920x1080, 2560x1440...
+        #[arg(long)]
+        res: Option<String>,
+        #[arg(long, value_parser = ["default", "full", "borderless", "window"])]
+        win_mode: Option<String>,
+        #[arg(long)]
+        hz: Option<u32>,
+        /// Argumentos extras do jogo
+        #[arg(long, allow_hyphen_values = true)]
+        extra: Option<String>,
+        /// Variáveis de ambiente (CHAVE=valor; separe várias com ';')
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Executa o jogo com o perfil (Steam: mostra as opções de inicialização para colar)
+    Launch { id: String },
+    /// Adiciona um jogo manual
+    Add {
+        name: String,
+        exe: String,
+        /// Argumentos fixos do jogo
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        args: String,
     },
 }
 
@@ -352,6 +413,19 @@ pub fn run(cli: Cli) -> Result<()> {
             println!("CPU: governador {} ({}) · EPP {} · boost {} · perfil {}", opt(&c.governor, ""), c.governors.join("/"), opt(&c.epp, ""), c.boost.map(|b| if b { "ligado" } else { "desligado" }).unwrap_or("—"), opt(&c.platform_profile, ""));
             Ok(())
         }
+        Some(Command::Games { action }) => games_cmd(&roots, action, json),
+        Some(Command::Report { out, smart }) => {
+            let st = SettingsStore::default_location().load().settings;
+            let rep = report::collect(&roots, &st, smart);
+            if json {
+                return print_json(&rep);
+            }
+            let path = out.unwrap_or_else(|| crate::util::home_dir().join(format!("resetexplode-{}.html", crate::util::now_local("%Y%m%d"))));
+            crate::util::write_atomic(&path, report::to_html(&rep).as_bytes()).with_context(|| format!("não consegui gravar {}", path.display()))?;
+            crate::util::give_to_user(&path);
+            println!("Relatório gravado em {}", path.display());
+            Ok(())
+        }
         Some(Command::Startup { action }) => startup(action, json),
         Some(Command::Tweaks { action }) => tweak_cmd(&roots, action, json),
         Some(Command::Serial) => {
@@ -494,6 +568,97 @@ fn backup_matches(b: &crate::settings::StartupBackup, wanted: &str) -> bool {
     let w = w.strip_suffix(".desktop").unwrap_or(&w);
     let file = b.original.rsplit('/').next().unwrap_or("").to_lowercase();
     b.name.to_lowercase() == w || file.strip_suffix(".desktop").unwrap_or(&file) == w
+}
+
+fn games_cmd(roots: &Roots, action: GameAction, json: bool) -> Result<()> {
+    let store = SettingsStore::default_location();
+    let st = store.load().settings;
+    let all = games::detect_all(&crate::util::home_dir(), &st.custom_games);
+    let find = |id: &str| -> Result<&games::Game> {
+        let by_id: Vec<_> = all.iter().filter(|g| g.id == id).collect();
+        if let [g] = by_id[..] {
+            return Ok(g);
+        }
+        if id.chars().count() < 3 {
+            bail!("jogo não encontrado: {id} (nomes parciais precisam de ao menos 3 letras; veja `games list`)");
+        }
+        let by_name: Vec<_> = all.iter().filter(|g| g.name.to_lowercase().contains(&id.to_lowercase())).collect();
+        match by_name[..] {
+            [g] => Ok(g),
+            [] => bail!("jogo não encontrado: {id} (veja `games list`)"),
+            _ => bail!("\"{id}\" casa com {} jogos; use o id exato (veja `games list`)", by_name.len()),
+        }
+    };
+    match action {
+        GameAction::List => {
+            if json {
+                return print_json(&all);
+            }
+            if all.is_empty() {
+                println!("Nenhum jogo encontrado (Steam, Heroic, Lutris). Adicione um com `games add`.");
+            }
+            for g in &all {
+                println!("{:<28} {:<14} {}", g.id, g.source.name(), g.name);
+            }
+        }
+        GameAction::Profile { id } => {
+            let g = find(&id)?;
+            let p = st.game_profiles.get(&g.id).cloned().unwrap_or_default();
+            print_json(&p)?;
+        }
+        GameAction::Set { id, priority, gamemode, mangohud, dgpu, performance_governor, style, res, win_mode, hz, extra, env } => {
+            let g = find(&id)?.clone();
+            let mut p = st.game_profiles.get(&g.id).cloned().unwrap_or_default();
+            if let Some(v) = priority { p.priority = v }
+            if let Some(v) = gamemode { p.gamemode = v }
+            if let Some(v) = mangohud { p.mangohud = v }
+            if let Some(v) = dgpu { p.dgpu = v }
+            if let Some(v) = performance_governor { p.performance_governor = v }
+            if let Some(v) = style { p.style = v }
+            if let Some(v) = res { p.res = v }
+            if let Some(v) = win_mode { p.win_mode = v }
+            if let Some(v) = hz { p.hz = v }
+            if let Some(v) = extra { p.extra = v }
+            if let Some(v) = env { p.env = v.split(';').map(str::trim).collect::<Vec<_>>().join("\n") }
+            // valida antes de gravar: um perfil quebrado nunca é salvo
+            launch::plan(&p, None, true, &|_| true).map_err(anyhow::Error::msg)?;
+            store.update(|s| s.game_profiles.insert(g.id.clone(), p)).context("não consegui salvar o perfil")?;
+            println!("Perfil de {} salvo.", g.name);
+        }
+        GameAction::Launch { id } => {
+            let g = find(&id)?;
+            let p = st.game_profiles.get(&g.id).cloned().unwrap_or_default();
+            let dgpu = gpu::primary(&gpu::collect(roots)).map(|x| x.vendor);
+            if let Some(appid) = g.steam_appid {
+                let pl = launch::plan(&p, dgpu, crate::util::is_root(), &crate::util::have).map_err(anyhow::Error::msg)?;
+                println!("Steam não aceita opções de fora. Cole isto em Propriedades → Opções de inicialização de \"{}\" (appid {appid}):\n\n  {}\n", g.name, launch::steam_options(&pl));
+                for w in &pl.warnings {
+                    eprintln!("aviso: {w}");
+                }
+                return Ok(());
+            }
+            let exe = p.exe_path.clone().or_else(|| g.exe.clone()).context("este jogo não tem executável conhecido (defina com `games add`)")?;
+            let base = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
+            let cancel = cancel_on_ctrl_c();
+            let o = launch::run(&p, &exe, &base, dgpu, &cancel).map_err(anyhow::Error::msg)?;
+            for w in &o.warnings {
+                eprintln!("aviso: {w}");
+            }
+            if o.cancelled {
+                std::process::exit(130);
+            }
+            println!("{} terminou (código {}).", g.name, o.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()));
+        }
+        GameAction::Add { name, exe, args } => {
+            if !std::path::Path::new(&exe).is_file() {
+                bail!("{exe} não é um arquivo");
+            }
+            launch::parse_args(&args).map_err(anyhow::Error::msg)?;
+            store.update(|s| s.custom_games.push(crate::settings::CustomGame { name: name.clone(), exe, args })).context("não consegui salvar")?;
+            println!("{name} adicionado.");
+        }
+    }
+    Ok(())
 }
 
 fn startup(action: StartupAction, json: bool) -> Result<()> {
@@ -738,6 +903,14 @@ mod tests {
         let b = crate::settings::StartupBackup { name: "Discord".into(), original: "/home/u/.config/autostart/discord-ptb.desktop".into(), backup: String::new(), removed_at: 0 };
         assert!(backup_matches(&b, "discord") && backup_matches(&b, "DISCORD") && backup_matches(&b, "discord-ptb.desktop") && backup_matches(&b, "discord-ptb"));
         assert!(!backup_matches(&b, "disc") && !backup_matches(&b, "ptb"));
+    }
+
+    #[test]
+    fn game_args_may_start_with_a_hyphen() {
+        let c = Cli::try_parse_from(["resetexplode", "games", "add", "Jogo", "/bin/true", "--args", "--base -x"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Games { action: GameAction::Add { ref args, .. } }) if args == "--base -x"));
+        let c = Cli::try_parse_from(["resetexplode", "games", "set", "portal", "--extra", "-novid -console", "--gamemode", "true"]).unwrap();
+        assert!(matches!(c.command, Some(Command::Games { action: GameAction::Set { gamemode: Some(true), .. } })));
     }
 
     #[test]
