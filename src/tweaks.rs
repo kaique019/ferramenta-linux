@@ -98,7 +98,7 @@ pub fn apply(r: &Roots, backup: &mut BTreeMap<String, Option<String>>, id: &str)
     }
     let first = !backup.contains_key(d.id);
     if first {
-        backup.insert(d.id.to_string(), Some(cur));
+        backup.insert(d.id.to_string(), Some(encode(&boot_id(r), &cur)));
     }
     if let Err(e) = write_priv(&path(r, d), d.recommended) {
         if first {
@@ -109,19 +109,53 @@ pub fn apply(r: &Roots, backup: &mut BTreeMap<String, Option<String>>, id: &str)
     Ok(())
 }
 
+/// O valor original é guardado junto com o id do boot: depois de reiniciar, o sistema já voltou ao padrão dele
+/// (que pode ter mudado, por exemplo via sysctl.conf), então o valor antigo não deve ser regravado.
+fn boot_id(r: &Roots) -> String {
+    read_trim(r.proc.join("sys/kernel/random/boot_id")).unwrap_or_default()
+}
+
+fn encode(boot: &str, value: &str) -> String {
+    format!("{boot}\t{value}")
+}
+
+/// (boot, valor). Registros antigos, sem boot, valem como "mesmo boot".
+fn decode(stored: &str) -> (Option<&str>, &str) {
+    match stored.split_once('\t') {
+        Some((b, v)) => (Some(b), v),
+        None => (None, stored),
+    }
+}
+
+/// O valor guardado precisa ter o formato do ajuste: o `settings.json` é do usuário e o valor vai para /proc/sys como
+/// root, então nada que não seja um número (ou uma das opções que o kernel lista) é aceito.
+fn plausible(opts: &[String], v: &str) -> bool {
+    if opts.is_empty() { !v.is_empty() && v.len() <= 12 && v.bytes().all(|b| b.is_ascii_digit()) } else { opts.iter().any(|o| o == v) }
+}
+
 /// Devolve o valor original. Só esquece o backup depois que a escrita funcionou.
-pub fn restore(r: &Roots, backup: &mut BTreeMap<String, Option<String>>, id: &str) -> Result<(), String> {
+/// `Ok(true)` = valor regravado; `Ok(false)` = o computador reiniciou desde a alteração, então já voltou ao padrão.
+pub fn restore(r: &Roots, backup: &mut BTreeMap<String, Option<String>>, id: &str) -> Result<bool, String> {
     let d = find(id)?;
     match backup.get(d.id).cloned() {
         None => Err(format!("não há valor original guardado de {id}")),
         Some(None) => {
             backup.remove(d.id);
-            Ok(())
+            Ok(false)
         }
-        Some(Some(orig)) => {
-            write_priv(&path(r, d), &orig)?;
+        Some(Some(stored)) => {
+            let (boot, orig) = decode(&stored);
+            if boot.is_some_and(|b| b != boot_id(r)) {
+                backup.remove(d.id);
+                return Ok(false);
+            }
+            let opts = read_value(r, d).map(|(_, o)| o).unwrap_or_default();
+            if !plausible(&opts, orig) {
+                return Err(format!("o valor guardado de {id} ({orig:?}) não é válido; não vou gravá-lo"));
+            }
+            write_priv(&path(r, d), orig)?;
             backup.remove(d.id);
-            Ok(())
+            Ok(true)
         }
     }
 }
@@ -146,6 +180,11 @@ mod tests {
         (d, r)
     }
 
+    fn put(p: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
     fn val(d: &tempfile::TempDir, f: &str) -> String {
         fs::read_to_string(d.path().join(f)).unwrap().trim().to_string()
     }
@@ -167,13 +206,50 @@ mod tests {
         let mut b = BTreeMap::new();
         apply(&r, &mut b, "swappiness").unwrap();
         assert_eq!(val(&d, "proc/sys/vm/swappiness"), "10");
-        assert_eq!(b["swappiness"].as_deref(), Some("60"));
+        assert_eq!(decode(b["swappiness"].as_deref().unwrap()).1, "60");
+        let first = b["swappiness"].clone();
         apply(&r, &mut b, "swappiness").unwrap();
-        assert_eq!(b["swappiness"].as_deref(), Some("60"), "aplicar de novo não perde o original");
-        restore(&r, &mut b, "swappiness").unwrap();
+        assert_eq!(b["swappiness"], first, "aplicar de novo não perde o original");
+        assert_eq!(restore(&r, &mut b, "swappiness"), Ok(true));
         assert_eq!(val(&d, "proc/sys/vm/swappiness"), "60");
         assert!(b.is_empty());
         assert!(restore(&r, &mut b, "swappiness").is_err());
+    }
+
+    #[test]
+    fn restore_skips_the_write_after_a_reboot() {
+        let (d, r) = setup();
+        put(&r.proc.join("sys/kernel/random/boot_id"), "boot-A\n");
+        let mut b = BTreeMap::new();
+        apply(&r, &mut b, "swappiness").unwrap();
+        assert_eq!(val(&d, "proc/sys/vm/swappiness"), "10");
+        // reinicia: novo boot, o sistema voltou ao padrão dele (aqui, 30, diferente do "original" guardado)
+        put(&r.proc.join("sys/kernel/random/boot_id"), "boot-B\n");
+        std::fs::write(d.path().join("proc/sys/vm/swappiness"), "30\n").unwrap();
+        assert_eq!(restore(&r, &mut b, "swappiness"), Ok(false));
+        assert_eq!(val(&d, "proc/sys/vm/swappiness"), "30", "o valor do novo boot não é sobrescrito");
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_tampered_backup_values() {
+        let (d, r) = setup();
+        for bad in ["abc", "1; echo x", "", "99999999999999999", "../../etc", "-1"] {
+            let mut b = BTreeMap::new();
+            b.insert("swappiness".to_string(), Some(bad.to_string()));
+            assert!(restore(&r, &mut b, "swappiness").is_err(), "{bad:?}");
+            assert_eq!(val(&d, "proc/sys/vm/swappiness"), "60", "{bad:?} não pode ser gravado");
+            assert!(b.contains_key("swappiness"), "o registro fica para o usuário ver");
+        }
+        let mut b = BTreeMap::new();
+        b.insert("thp".to_string(), Some("hack".to_string()));
+        assert!(restore(&r, &mut b, "thp").is_err());
+        assert_eq!(val(&d, "sys/kernel/mm/transparent_hugepage/enabled"), "[always] madvise never");
+        // valor legítimo no formato antigo (sem boot) continua valendo
+        let mut b = BTreeMap::new();
+        b.insert("swappiness".to_string(), Some("40".to_string()));
+        assert_eq!(restore(&r, &mut b, "swappiness"), Ok(true));
+        assert_eq!(val(&d, "proc/sys/vm/swappiness"), "40");
     }
 
     #[test]

@@ -360,35 +360,98 @@ pub fn app_state_dir() -> PathBuf {
     state_dir().join("resetexplode")
 }
 
-/// Se o programa roda como root em nome de outro usuário, devolve a posse do arquivo ao usuário.
-pub fn give_to_user(path: &Path) {
-    if is_root() && User::is_switched() {
-        let u = User::target();
-        if let Ok(c) = CString::new(path.as_os_str().as_encoded_bytes()) {
-            // SAFETY: `c` é uma string C válida pelo tempo da chamada.
+thread_local! {
+    static FS_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Faz a E/S de arquivos desta thread com a identidade do usuário-alvo (`setfsuid`, que vale só para a thread).
+///
+/// Sob `sudo` o programa é root, mas lê e grava em pastas que o usuário controla. Se fizesse isso como root, um
+/// symlink plantado pelo usuário (`settings.json.tmp1234 -> /etc/shadow`) viraria escrita ou leitura arbitrária como
+/// root. Com o fsuid do usuário, o kernel recusa tudo o que o próprio usuário não poderia fazer, e os arquivos
+/// criados já saem com o dono certo (sem `chown`). Quando não há troca de usuário, não faz nada.
+pub struct FsUser {
+    active: bool,
+}
+
+impl FsUser {
+    pub fn enter() -> Result<FsUser, String> {
+        if is_root() && User::is_switched() {
+            let u = User::target();
+            Self::enter_as(u.uid, u.gid)
+        } else {
+            Ok(FsUser { active: false })
+        }
+    }
+
+    pub fn enter_as(uid: u32, gid: u32) -> Result<FsUser, String> {
+        let first = FS_DEPTH.with(|d| {
+            d.set(d.get() + 1);
+            d.get() == 1
+        });
+        let guard = FsUser { active: true };
+        if first {
+            // SAFETY: setfsuid/setfsgid só trocam a identidade de arquivos da thread atual.
             unsafe {
-                libc::chown(c.as_ptr(), u.uid, u.gid);
+                libc::setfsgid(gid);
+                libc::setfsuid(uid);
+                // chamar com -1 devolve o valor atual: confirma que a troca valeu (se não, nada é feito)
+                if libc::setfsuid(u32::MAX) as u32 != uid {
+                    return Err("não consegui assumir a identidade do usuário para mexer nos arquivos dele".into());
+                }
+            }
+        }
+        Ok(guard)
+    }
+}
+
+impl Drop for FsUser {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let last = FS_DEPTH.with(|d| {
+            d.set(d.get() - 1);
+            d.get() == 0
+        });
+        if last {
+            // SAFETY: devolve a identidade de arquivos da thread (root) ao valor original.
+            unsafe {
+                libc::setfsuid(0);
+                libc::setfsgid(0);
             }
         }
     }
 }
 
-/// Cria um diretório (e os pais) já com a posse correta quando roda sob sudo.
+/// Executa `f` com a identidade de arquivos do usuário-alvo (veja [`FsUser`]).
+pub fn as_user<R>(f: impl FnOnce() -> R) -> Result<R, String> {
+    let _g = FsUser::enter()?;
+    Ok(f())
+}
+
+/// Como [`as_user`] para funções que já devolvem `io::Result`.
+pub fn as_user_io<R>(f: impl FnOnce() -> std::io::Result<R>) -> std::io::Result<R> {
+    as_user(f).map_err(std::io::Error::other)?
+}
+
+/// Lê um arquivo de texto de tamanho limitado e só se for arquivo comum (recusa `/dev/zero`, FIFOs e afins que um
+/// symlink poderia apontar). `None` se não existir, for grande demais ou não for UTF-8.
+pub fn read_small(path: impl AsRef<Path>, max_bytes: u64) -> Option<String> {
+    use std::io::Read;
+    let f = fs::File::open(path.as_ref()).ok()?;
+    let md = f.metadata().ok()?;
+    if !md.is_file() || md.len() > max_bytes {
+        return None;
+    }
+    let mut s = String::new();
+    f.take(max_bytes + 1).read_to_string(&mut s).ok()?;
+    (s.len() as u64 <= max_bytes).then_some(s)
+}
+
+/// Cria um diretório (e os pais) como o usuário-alvo, quando roda sob sudo.
 pub fn create_dir_for_user(dir: &Path) -> std::io::Result<()> {
-    let mut missing = Vec::new();
-    let mut cur = Some(dir);
-    while let Some(d) = cur {
-        if d.exists() {
-            break;
-        }
-        missing.push(d.to_path_buf());
-        cur = d.parent();
-    }
-    fs::create_dir_all(dir)?;
-    for d in missing.iter().rev() {
-        give_to_user(d);
-    }
-    Ok(())
+    as_user_io(|| fs::create_dir_all(dir))
 }
 
 /// Grava um arquivo de forma atômica (temporário + rename), com a posse do usuário-alvo.
@@ -397,26 +460,39 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 }
 
 /// Como [`write_atomic`], com permissões explícitas (ex.: `0o600` para arquivos com chaves de API).
+///
+/// O temporário tem nome imprevisível e é criado com `O_EXCL|O_NOFOLLOW`; o `rename` troca o próprio caminho final
+/// (se for um symlink, o symlink é substituído, nunca seguido).
 pub fn write_atomic_mode(path: &Path, contents: &[u8], mode: u32) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    if let Some(dir) = path.parent() {
-        create_dir_for_user(dir)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(".tmp{}", std::process::id()));
-    let tmp = PathBuf::from(tmp);
-    {
-        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&tmp)?;
-        f.write_all(contents)?;
-        f.sync_all()?;
-    }
-    give_to_user(&tmp);
-    if let Err(e) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
+    use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+    static N: AtomicU32 = AtomicU32::new(0);
+    as_user_io(|| {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+        for _ in 0..32 {
+            let mut name = path.as_os_str().to_owned();
+            name.push(format!(".tmp{}-{}-{:x}", std::process::id(), N.fetch_add(1, Relaxed), nanos ^ N.load(Relaxed).wrapping_mul(0x9E37_79B1)));
+            let tmp = PathBuf::from(name);
+            let opened = fs::OpenOptions::new().write(true).create_new(true).mode(mode).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&tmp);
+            let mut f = match opened {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            };
+            let res = f.write_all(contents).and_then(|_| f.sync_all());
+            drop(f);
+            if let Err(e) = res.and_then(|_| fs::rename(&tmp, path)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+            return Ok(());
+        }
+        Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "não consegui criar um arquivo temporário único"))
+    })
 }
 
 /// O usuário atual tem permissão de leitura e escrita no arquivo?
@@ -734,6 +810,141 @@ pub fn os(s: &str) -> &OsStr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fsuid_of_this_thread() -> u32 {
+        let st = fs::read_to_string("/proc/thread-self/status").unwrap();
+        let line = st.lines().find(|l| l.starts_with("Uid:")).unwrap();
+        line.split_whitespace().nth(4).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn fs_identity_is_per_thread_nested_and_restored() {
+        if !is_root() {
+            return; // precisa de root para trocar o fsuid
+        }
+        let before = fsuid_of_this_thread();
+        // thread criada ANTES do guard (as novas herdam a identidade de quem as cria): representa a coleta em segundo plano
+        let (ask_tx, ask_rx) = mpsc::channel::<()>();
+        let (ans_tx, ans_rx) = mpsc::channel::<u32>();
+        let bg = thread::spawn(move || {
+            while ask_rx.recv().is_ok() {
+                ans_tx.send(fsuid_of_this_thread()).unwrap();
+            }
+        });
+        let (inside, other_thread_sees, nested_ok) = {
+            let g = FsUser::enter_as(65534, 65534).unwrap();
+            let inside = fsuid_of_this_thread();
+            ask_tx.send(()).unwrap();
+            let other = ans_rx.recv().unwrap();
+            let nested = {
+                let _g2 = FsUser::enter_as(65534, 65534).unwrap();
+                fsuid_of_this_thread() == 65534
+            };
+            let still = fsuid_of_this_thread() == 65534; // sair do aninhado não solta o externo
+            drop(g);
+            (inside, other, nested && still)
+        };
+        assert_eq!(inside, 65534);
+        assert_eq!(other_thread_sees, before, "outra thread continua root: a coleta de /sys não perde privilégios");
+        assert!(nested_ok);
+        assert_eq!(fsuid_of_this_thread(), before, "restaurado ao sair");
+        drop(ask_tx);
+        bg.join().unwrap();
+    }
+
+    #[test]
+    fn symlink_to_a_root_only_file_is_unreadable_and_untouchable_as_the_user() {
+        if !is_root() {
+            return;
+        }
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = tempfile::tempdir().unwrap();
+        fs::set_permissions(d.path(), fs::Permissions::from_mode(0o777)).unwrap();
+        let secret = d.path().join("secret");
+        fs::write(&secret, "segredo").unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = d.path().join("link");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert_eq!(read_small(&link, 100).as_deref(), Some("segredo"), "como root, o symlink leva ao segredo");
+        {
+            let _g = FsUser::enter_as(65534, 65534).unwrap();
+            assert_eq!(read_small(&link, 100), None, "como o usuário, não");
+            assert!(fs::OpenOptions::new().write(true).open(&link).is_err());
+            // arquivos criados saem com o dono certo, sem chown
+            let mine = d.path().join("meu");
+            fs::write(&mine, "x").unwrap();
+            assert_eq!(fs::metadata(&mine).unwrap().uid(), 65534);
+        }
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "segredo");
+    }
+
+    #[test]
+    fn write_atomic_replaces_a_symlink_instead_of_following_it() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("alvo");
+        fs::write(&target, "intacto").unwrap();
+        let link = d.path().join("config.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomic(&link, b"novo").unwrap();
+        assert_eq!(fs::read_to_string(&target).unwrap(), "intacto");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "novo");
+        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn write_atomic_ignores_planted_names_sets_mode_and_leaves_no_temporaries() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("s.json");
+        let victim = d.path().join("vitima");
+        fs::write(&victim, "intacta").unwrap();
+        // o usuário planta symlinks com os nomes "óbvios" do temporário antigo
+        for suffix in [format!(".tmp{}", std::process::id()), ".tmp0-0".into(), ".tmp".into()] {
+            let _ = std::os::unix::fs::symlink(&victim, d.path().join(format!("s.json{suffix}")));
+        }
+        write_atomic_mode(&path, b"{}", 0o600).unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "intacta");
+        let temps: Vec<_> = fs::read_dir(d.path()).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("s.json.tmp") && !fs::symlink_metadata(d.path().join(n)).unwrap().file_type().is_symlink()).collect();
+        assert!(temps.is_empty(), "sobrou temporário: {temps:?}");
+    }
+
+    #[test]
+    fn concurrent_atomic_writes_never_collide_or_corrupt() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("c.json");
+        let hs: Vec<_> = (0..16).map(|i| {
+            let p = path.clone();
+            std::thread::spawn(move || {
+                for n in 0..20 {
+                    write_atomic(&p, format!("{{\"w\":{i},\"n\":{n}}}").as_bytes()).unwrap();
+                }
+            })
+        }).collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v["n"].as_u64().is_some(), "o arquivo final é sempre um JSON inteiro");
+    }
+
+    #[test]
+    fn read_small_accepts_only_small_regular_text_files() {
+        let d = tempfile::tempdir().unwrap();
+        let ok = d.path().join("ok");
+        fs::write(&ok, "abc").unwrap();
+        assert_eq!(read_small(&ok, 3).as_deref(), Some("abc"));
+        assert_eq!(read_small(&ok, 2), None, "grande demais");
+        assert_eq!(read_small(d.path(), 100), None, "diretório");
+        assert_eq!(read_small(d.path().join("nao-existe"), 100), None);
+        let bin = d.path().join("bin");
+        fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
+        assert_eq!(read_small(&bin, 100), None, "não é UTF-8");
+        let zero = d.path().join("zero");
+        std::os::unix::fs::symlink("/dev/zero", &zero).unwrap();
+        assert_eq!(read_small(&zero, 1 << 20), None, "/dev/zero não esgota a memória");
+    }
+
 
     #[test]
     fn natural_sort_orders_numbers() {

@@ -499,7 +499,7 @@ pub fn ascii_preview(pixels: &[u8], width: usize, height: usize, cols: usize) ->
                             n += 1;
                         }
                     }
-                    let g = if n == 0 { 0 } else { sum / n } as usize;
+                    let g = sum.checked_div(n).unwrap_or(0) as usize;
                     RAMP[g * (RAMP.len() - 1) / 255] as char
                 })
                 .collect()

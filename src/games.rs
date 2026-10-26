@@ -7,8 +7,12 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::settings::CustomGame;
-use crate::util::dir_names;
+use crate::util::{as_user, dir_names, read_small};
 use crate::vdf;
+
+/// Limites de leitura: estes arquivos ficam na pasta do usuário e podem ser trocados por symlinks.
+const MAX_TEXT: u64 = 1 << 20;
+const MAX_JSON: u64 = 16 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Source {
@@ -66,6 +70,10 @@ fn steam_roots(home: &Path) -> Vec<PathBuf> {
 
 /// Bibliotecas da Steam: as pastas `steamapps` de cada raiz e as listadas em `libraryfolders.vdf`.
 pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
+    as_user(|| steam_libraries_inner(home)).unwrap_or_default()
+}
+
+fn steam_libraries_inner(home: &Path) -> Vec<PathBuf> {
     let mut seen = BTreeSet::new();
     let mut out = vec![];
     let mut add = |p: PathBuf, out: &mut Vec<PathBuf>| {
@@ -76,7 +84,7 @@ pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
     };
     for root in steam_roots(home) {
         add(root.join("steamapps"), &mut out);
-        if let Ok(text) = fs::read_to_string(root.join("steamapps/libraryfolders.vdf"))
+        if let Ok(text) = read_small(root.join("steamapps/libraryfolders.vdf"), MAX_TEXT).ok_or(())
             && let Ok(v) = vdf::parse(&text)
                 && let Some(lf) = v.get("libraryfolders") {
                     for (_, entry) in lf.entries() {
@@ -90,13 +98,17 @@ pub fn steam_libraries(home: &Path) -> Vec<PathBuf> {
 }
 
 pub fn steam_games(home: &Path) -> Vec<Game> {
+    as_user(|| steam_games_inner(home)).unwrap_or_default()
+}
+
+fn steam_games_inner(home: &Path) -> Vec<Game> {
     let mut games = vec![];
     for lib in steam_libraries(home) {
         for name in dir_names(&lib) {
             if !(name.starts_with("appmanifest_") && name.ends_with(".acf")) {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(lib.join(&name)) else { continue };
+            let Some(text) = read_small(lib.join(&name), MAX_TEXT) else { continue };
             let Ok(v) = vdf::parse(&text) else { continue };
             let Some(app) = v.get("AppState") else { continue };
             let (Some(appid), Some(title)) = (app.get_str("appid").and_then(|s| s.parse::<u32>().ok()), app.get_str("name")) else { continue };
@@ -119,7 +131,7 @@ pub fn steam_games(home: &Path) -> Vec<Game> {
 }
 
 fn json_file(path: &Path) -> Option<serde_json::Value> {
-    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
+    serde_json::from_str(&read_small(path, MAX_JSON)?).ok()
 }
 
 fn s(v: &serde_json::Value, k: &str) -> Option<String> {
@@ -127,6 +139,10 @@ fn s(v: &serde_json::Value, k: &str) -> Option<String> {
 }
 
 pub fn heroic_games(home: &Path) -> Vec<Game> {
+    as_user(|| heroic_games_inner(home)).unwrap_or_default()
+}
+
+fn heroic_games_inner(home: &Path) -> Vec<Game> {
     let mut games = vec![];
     for rel in [".config/heroic", ".var/app/com.heroicgameslauncher.hgl/config/heroic"] {
         let base = home.join(rel);
@@ -178,12 +194,16 @@ fn lutris_game(slug: &str, text: &str) -> Option<Game> {
 }
 
 pub fn lutris_games(home: &Path) -> Vec<Game> {
+    as_user(|| lutris_games_inner(home)).unwrap_or_default()
+}
+
+fn lutris_games_inner(home: &Path) -> Vec<Game> {
     let mut out = vec![];
     for rel in [".local/share/lutris/games", ".var/app/net.lutris.Lutris/data/lutris/games"] {
         let dir = home.join(rel);
         for f in dir_names(&dir) {
             if let Some(slug) = f.strip_suffix(".yml")
-                && let Some(g) = fs::read_to_string(dir.join(&f)).ok().and_then(|t| lutris_game(slug, &t)) {
+                && let Some(g) = read_small(dir.join(&f), MAX_TEXT).and_then(|t| lutris_game(slug, &t)) {
                     out.push(g);
                 }
         }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::settings::OverlayConfig;
-use crate::util::{config_dir, create_dir_for_user, give_to_user, write_atomic};
+use crate::util::{as_user, config_dir, create_dir_for_user, read_small, write_atomic};
 
 /// (chave, opção do MangoHud, rótulo)
 pub const METRICS: &[(&str, &str, &str)] = &[
@@ -56,20 +56,29 @@ pub fn default_path() -> PathBuf {
 }
 
 /// Grava a configuração. Se já existir um arquivo que não é nosso, guarda uma cópia `.bak` (uma vez) antes.
+/// Tudo acontece com a identidade do usuário-alvo: um symlink plantado em `MangoHud.conf` ou `.bak` não leva o root
+/// a ler ou gravar onde o usuário não poderia.
 pub fn write(cfg: &OverlayConfig, path: &Path) -> Result<(), String> {
+    as_user(|| write_inner(cfg, path))?
+}
+
+fn write_inner(cfg: &OverlayConfig, path: &Path) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         create_dir_for_user(dir).map_err(|e| format!("não consegui criar {}: {e}", dir.display()))?;
     }
-    if let Ok(old) = std::fs::read_to_string(path) {
-        let bak = path.with_extension("conf.bak");
-        if !old.starts_with(MARKER) && !bak.exists() {
-            std::fs::write(&bak, old).map_err(|e| format!("falha ao guardar o arquivo antigo: {e}"))?;
-            give_to_user(&bak);
+    let bak = path.with_extension("conf.bak");
+    // symlink_metadata: um symlink pendente também conta como "já existe"
+    if std::fs::symlink_metadata(path).is_ok() {
+        let old = read_small(path, 1 << 20);
+        let ours = old.as_deref().is_some_and(|o| o.starts_with(MARKER));
+        if !ours && std::fs::symlink_metadata(&bak).is_err() {
+            match old {
+                Some(o) => write_atomic(&bak, o.as_bytes()).map_err(|e| format!("falha ao guardar o arquivo antigo: {e}"))?,
+                None => return Err(format!("{} existe mas não é um arquivo de texto comum; não vou sobrescrever", path.display())),
+            }
         }
     }
-    write_atomic(path, generate(cfg).as_bytes()).map_err(|e| format!("não consegui gravar {}: {e}", path.display()))?;
-    give_to_user(path);
-    Ok(())
+    write_atomic(path, generate(cfg).as_bytes()).map_err(|e| format!("não consegui gravar {}: {e}", path.display()))
 }
 
 #[cfg(test)]

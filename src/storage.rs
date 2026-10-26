@@ -92,6 +92,7 @@ fn u64_of(v: &Value) -> Option<u64> {
 }
 
 /// Interpreta a saída de `smartctl -a -j`.
+#[allow(clippy::field_reassign_with_default)]
 pub fn parse_smartctl_json(text: &str) -> Result<SmartData, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("saída do smartctl inválida: {e}"))?;
     let mut d = SmartData::default();

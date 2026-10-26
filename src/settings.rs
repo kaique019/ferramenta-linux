@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::diag;
-use crate::util::{app_config_dir, now_unix, write_atomic_mode};
+use crate::util::{app_config_dir, as_user, now_unix, write_atomic_mode};
 
 /// Quantos resultados de benchmark ficam no histórico.
 pub const HISTORY_LEN: usize = 10;
@@ -231,6 +231,25 @@ pub struct Loaded {
 
 static LOCK: Mutex<()> = Mutex::new(());
 
+/// Tamanho máximo aceito para o arquivo de configurações (o normal tem alguns KiB).
+const MAX_SETTINGS_BYTES: u64 = 8 << 20;
+
+/// Lê só arquivo comum e de tamanho razoável (um symlink para /dev/zero não esgota a memória).
+fn read_limited(path: &Path, max: u64) -> io::Result<String> {
+    use std::io::Read;
+    let f = fs::File::open(path)?;
+    let md = f.metadata()?;
+    if !md.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "não é um arquivo comum"));
+    }
+    if md.len() > max {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("arquivo grande demais ({} bytes)", md.len())));
+    }
+    let mut s = String::new();
+    f.take(max).read_to_string(&mut s)?;
+    Ok(s)
+}
+
 /// Acesso ao arquivo de configurações.
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
@@ -258,7 +277,15 @@ impl SettingsStore {
     }
 
     pub fn load(&self) -> Loaded {
-        let text = match fs::read_to_string(&self.path) {
+        // roda com a identidade do usuário-alvo: um symlink no lugar do arquivo não faz o root ler o que não deveria
+        match as_user(|| self.load_inner()) {
+            Ok(l) => l,
+            Err(e) => Loaded { settings: Settings::default(), warning: Some(e) },
+        }
+    }
+
+    fn load_inner(&self) -> Loaded {
+        let text = match read_limited(&self.path, MAX_SETTINGS_BYTES) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Loaded { settings: Settings::default(), warning: None },
             Err(e) => {

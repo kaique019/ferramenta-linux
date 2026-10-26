@@ -288,7 +288,10 @@ pub fn cancel_on_ctrl_c() -> Cancel {
     let c = Cancel::new();
     // SAFETY: o handler só grava em um AtomicBool, o que é seguro em contexto de sinal.
     unsafe {
-        libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t);
+        // Ctrl-C, `kill` e fechar o terminal: todos cancelam o teste/jogo e deixam o Drop restaurar o que foi alterado
+        for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::signal(sig, on_sigint as *const () as libc::sighandler_t);
+        }
     }
     let c2 = c.clone();
     std::thread::spawn(move || {
@@ -438,7 +441,6 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             let path = out.unwrap_or_else(|| crate::util::home_dir().join(format!("resetexplode-{}.html", crate::util::now_local("%Y%m%d"))));
             crate::util::write_atomic(&path, report::to_html(&rep).as_bytes()).with_context(|| format!("não consegui gravar {}", path.display()))?;
-            crate::util::give_to_user(&path);
             println!("Relatório gravado em {}", path.display());
             Ok(())
         }
@@ -605,14 +607,12 @@ fn theme_cmd(list: bool, preset: Option<String>, write: bool, force: bool) -> Re
             bail!("{} já existe; use --force para sobrescrever (a versão atual vira .bak)", path.display());
         }
         let bak = path.with_extension("json.bak");
-        std::fs::copy(&path, &bak).with_context(|| format!("não consegui guardar {}", bak.display()))?;
-        crate::util::give_to_user(&bak);
+        crate::util::as_user_io(|| std::fs::copy(&path, &bak)).with_context(|| format!("não consegui guardar {}", bak.display()))?;
     }
     if let Some(dir) = path.parent() {
         crate::util::create_dir_for_user(dir).with_context(|| format!("não consegui criar {}", dir.display()))?;
     }
     crate::util::write_atomic(&path, json.as_bytes()).with_context(|| format!("não consegui gravar {}", path.display()))?;
-    crate::util::give_to_user(&path);
     println!("Tema {} gravado em {}. Edite as cores e aperte T na TUI para recarregar.", th.name, path.display());
     Ok(())
 }
@@ -755,7 +755,7 @@ fn startup(action: StartupAction, json: bool) -> Result<()> {
             }
             let mut ok = vec![];
             for b in &wanted {
-                match autostart::restore(b) {
+                match autostart::restore(&dirs, b) {
                     Ok(()) => {
                         println!("Restaurado: {}", b.name);
                         ok.push(b.original.clone());
@@ -791,8 +791,8 @@ fn tweak_cmd(roots: &Roots, action: TweakAction, json: bool) -> Result<()> {
         }
         TweakAction::Restore { id } => {
             let res = store.update(|s| tweaks::restore(roots, &mut s.tweak_backup, &id)).context("não consegui salvar as configurações")?;
-            res.map_err(anyhow::Error::msg)?;
-            println!("{id} restaurado.");
+            let wrote = res.map_err(anyhow::Error::msg)?;
+            if wrote { println!("{id} restaurado.") } else { println!("{id}: o computador reiniciou desde a alteração, então já voltou ao padrão; nada a fazer.") }
         }
     }
     Ok(())

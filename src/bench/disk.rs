@@ -74,6 +74,7 @@ fn cancelled() -> String {
 }
 
 /// Fase aleatória com 1 requisição por vez. Devolve (IOPS, latência média em µs).
+#[allow(clippy::too_many_arguments)]
 fn random_q1(file: &std::fs::File, slots: u64, write: bool, secs: f64, progress: &dyn Fn(&str, f64), phase: &str, start: f64, span: f64, cancel: &Cancel) -> Result<(f64, f64), String> {
     let mut buf = AlignedBuf::new(SMALL);
     fill_random(buf.as_mut_slice(), 11);

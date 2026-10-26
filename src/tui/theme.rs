@@ -111,7 +111,7 @@ pub fn parse_color(s: &str) -> Result<Color, String> {
         let ok = h.chars().all(|c| c.is_ascii_hexdigit());
         let v = match (ok, h.len()) {
             (true, 6) => u32::from_str_radix(h, 16).ok(),
-            (true, 3) => u32::from_str_radix(h, 16).ok().map(|v| ((v >> 8 & 0xf) * 0x11) << 16 | ((v >> 4 & 0xf) * 0x11) << 8 | (v & 0xf) * 0x11),
+            (true, 3) => u32::from_str_radix(h, 16).ok().map(|v| (((v >> 8) & 0xf) * 0x11) << 16 | ((((v >> 4) & 0xf) * 0x11) << 8) | ((v & 0xf) * 0x11)),
             _ => None,
         };
         return v.map(rgb).ok_or_else(|| format!("cor hexadecimal inválida: {s:?} (use #rrggbb)"));
@@ -301,14 +301,14 @@ impl Theme {
 
 /// Lê o tema do arquivo. Arquivo ausente = tema padrão sem aviso; erro = tema padrão com o motivo.
 pub fn load(path: &Path) -> (Theme, Option<String>) {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Theme::default(), None),
-        Err(e) => return (Theme::default(), Some(format!("não consegui ler {}: {e}", path.display()))),
+    // com a identidade do usuário (sob sudo) e só arquivo comum de até 64 KiB: symlink para /etc/shadow ou /dev/zero não vale
+    let read = crate::util::as_user(|| if std::fs::symlink_metadata(path).is_err() { Ok(None) } else { crate::util::read_small(path, 64 * 1024).map(Some).ok_or(()) });
+    let text = match read {
+        Ok(Ok(None)) => return (Theme::default(), None),
+        Ok(Ok(Some(t))) => t,
+        Ok(Err(())) => return (Theme::default(), Some(format!("não consegui ler {} (precisa ser um arquivo de texto comum de até 64 KiB). Usando o tema padrão.", path.display()))),
+        Err(e) => return (Theme::default(), Some(e)),
     };
-    if text.len() > 64 * 1024 {
-        return (Theme::default(), Some(format!("{} é grande demais para um tema", path.display())));
-    }
     match serde_json::from_str::<ThemeFile>(&text).map_err(|e| e.to_string()).and_then(|f| Theme::from_file(&f)) {
         Ok(t) => (t, None),
         Err(e) => (Theme::default(), Some(format!("tema inválido em {}: {e}. Usando o tema padrão.", path.display()))),

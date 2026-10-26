@@ -75,8 +75,11 @@ pub struct LaunchReq {
 pub enum Effect {
     None,
     Quit,
-    Launch(LaunchReq),
+    Launch(Box<LaunchReq>),
 }
+
+/// Instalação em andamento: nome do programa e a tarefa que o instala.
+pub type InstallTask = (String, Task<(), Result<(), String>>);
 
 pub struct App {
     pub env: Env,
@@ -99,7 +102,7 @@ pub struct App {
     pub startup: Vec<autostart::AutostartEntry>,
     pub removed: Vec<StartupBackup>,
     pub apps: Vec<installer::AppStatus>,
-    pub install: Option<(String, Task<(), Result<(), String>>)>,
+    pub install: Option<InstallTask>,
     pub status: Option<(Level, String)>,
     pub theme: theme::Theme,
     pub quit: bool,
@@ -407,7 +410,7 @@ impl App {
                 };
                 let st = self.env.store.load().settings;
                 let args = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
-                return Effect::Launch(LaunchReq { name: g.name, exe, args, profile });
+                return Effect::Launch(Box::new(LaunchReq { name: g.name, exe, args, profile }));
             }
             _ => {}
         }
@@ -442,7 +445,7 @@ impl App {
                 let Some(t) = self.tweaks.get(sel).cloned() else { return };
                 let roots = self.env.roots.clone();
                 let res = if t.applied && t.can_restore {
-                    self.env.store.update(|s| tweaks::restore(&roots, &mut s.tweak_backup, t.id)).map(|r| r.map(|_| format!("{} restaurado", t.id)))
+                    self.env.store.update(|s| tweaks::restore(&roots, &mut s.tweak_backup, t.id)).map(|r| r.map(|wrote| if wrote { format!("{} restaurado", t.id) } else { format!("{}: o computador reiniciou, já voltou ao padrão", t.id) }))
                 } else if t.applied {
                     self.set_status(Level::Info, "já está no valor recomendado e não há original guardado");
                     return;
@@ -469,7 +472,7 @@ impl App {
                         Err(err) => self.set_status(Level::Err, err),
                     }
                 } else if let Some(b) = self.removed.iter().find(|b| b.original.ends_with(&format!("/{}", e.file))).cloned() {
-                    match autostart::restore(&b) {
+                    match autostart::restore(&self.env.autostart, &b) {
                         Ok(()) => {
                             let orig = b.original.clone();
                             let _ = self.env.store.update(|s| s.startup_removed.retain(|x| x.original != orig));
@@ -658,7 +661,8 @@ mod tests {
     }
 
     fn wait_job(app: &mut App) {
-        for _ in 0..200 {
+        // folga grande: com a suíte inteira em paralelo a thread do teste pode demorar para ser escalonada
+        for _ in 0..1500 {
             app.tick();
             if app.job.is_none() {
                 return;

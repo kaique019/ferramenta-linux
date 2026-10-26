@@ -153,6 +153,23 @@ fn validate(value: &str, allowed: &[String], what: &str) -> Result<(), String> {
     if allowed.iter().any(|a| a == value) { Ok(()) } else { Err(format!("{what} \"{value}\" inválido; opções: {}", allowed.join(", "))) }
 }
 
+/// Governador de cada CPU (nome da pasta `cpuN` -> governador), para restaurar exatamente o que havia.
+pub fn governors(r: &Roots) -> std::collections::BTreeMap<String, String> {
+    let base = r.sys.join("devices/system/cpu");
+    dir_names(&base)
+        .into_iter()
+        .filter(|n| n.strip_prefix("cpu").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())))
+        .filter_map(|n| read_trim(base.join(&n).join("cpufreq/scaling_governor")).map(|g| (n, g)))
+        .collect()
+}
+
+/// Devolve a cada CPU o governador de `snapshot` (os que o kernel não aceita mais são ignorados). Quantas voltaram.
+pub fn restore_governors(r: &Roots, snapshot: &std::collections::BTreeMap<String, String>) -> usize {
+    let base = r.sys.join("devices/system/cpu");
+    let allowed = collect_cpu(r).governors;
+    snapshot.iter().filter(|(cpu, g)| allowed.contains(g) && write_priv(&base.join(cpu).join("cpufreq/scaling_governor"), g).is_ok()).count()
+}
+
 /// Define o governador em todas as CPUs. Devolve quantas foram alteradas.
 pub fn set_governor(r: &Roots, governor: &str) -> Result<usize, String> {
     let cpu = collect_cpu(r);
@@ -317,6 +334,25 @@ mod tests {
         assert_eq!(set_epp(&r, "power"), Ok(2));
         assert!(set_platform_profile(&r, "balanced").is_ok());
         assert!(set_platform_profile(&r, "hack").is_err());
+    }
+
+    #[test]
+    fn governors_snapshot_and_restore_are_per_cpu() {
+        let d = tempfile::tempdir().unwrap();
+        fake(d.path());
+        let gov = |c: u32| d.path().join(format!("sys/devices/system/cpu/cpu{c}/cpufreq/scaling_governor"));
+        fs::write(gov(1), "performance\n").unwrap(); // CPUs com governadores diferentes
+        let r = Roots::under(d.path());
+        let snap = governors(&r);
+        assert_eq!(snap.get("cpu0").map(String::as_str), Some("powersave"));
+        assert_eq!(snap.get("cpu1").map(String::as_str), Some("performance"));
+        set_governor(&r, "performance").unwrap();
+        assert_eq!(restore_governors(&r, &snap), 2);
+        assert_eq!(read_trim(gov(0)).as_deref(), Some("powersave"));
+        assert_eq!(read_trim(gov(1)).as_deref(), Some("performance"), "cada CPU volta ao seu próprio valor");
+        let mut bad = snap.clone();
+        bad.insert("cpu0".into(), "../../x".into());
+        assert_eq!(restore_governors(&r, &bad), 1, "valor que o kernel não lista é ignorado");
     }
 
     #[test]
