@@ -352,12 +352,12 @@ pub fn state_dir() -> PathBuf {
 
 /// Pasta de configurações do programa.
 pub fn app_config_dir() -> PathBuf {
-    config_dir().join("resetexplode")
+    config_dir().join("pingu")
 }
 
 /// Pasta de estado do programa (backups, histórico).
 pub fn app_state_dir() -> PathBuf {
-    state_dir().join("resetexplode")
+    state_dir().join("pingu")
 }
 
 thread_local! {

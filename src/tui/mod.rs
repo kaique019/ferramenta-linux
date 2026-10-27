@@ -306,7 +306,7 @@ impl App {
             }
             KeyCode::Char('t') if !ctrl => {
                 self.theme = self.theme.next_preset();
-                self.set_status(Level::Info, format!("tema: {} (temporário; fixe com `resetexplode theme --preset {} --write`)", self.theme.name, self.theme.name));
+                self.set_status(Level::Info, format!("tema: {} (temporário; fixe com `pingu theme --preset {} --write`)", self.theme.name, self.theme.name));
                 return Effect::None;
             }
             KeyCode::Char('T') => {

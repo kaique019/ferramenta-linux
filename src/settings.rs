@@ -1,4 +1,4 @@
-//! Configurações e histórico persistidos em `~/.config/resetexplode/settings.json`.
+//! Configurações e histórico persistidos em `~/.config/pingu/settings.json`.
 //!
 //! Diferenças em relação ao projeto Windows (problemas encontrados na análise):
 //! * a gravação é atômica (arquivo temporário + rename) e o arquivo anterior vira `settings.json.bak`;
@@ -261,7 +261,7 @@ impl SettingsStore {
         SettingsStore { path: path.into() }
     }
 
-    /// `~/.config/resetexplode/settings.json` (do usuário que chamou o sudo, se for o caso).
+    /// `~/.config/pingu/settings.json` (do usuário que chamou o sudo, se for o caso).
     pub fn default_location() -> Self {
         Self::new(app_config_dir().join("settings.json"))
     }

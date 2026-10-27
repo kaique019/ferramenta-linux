@@ -1,6 +1,6 @@
-# ferramenta-linux
+# Pingu
 
-Versão para Linux, em Rust, inspirada no RESET EXPLODE (Windows).
+Versão para Linux, em Rust, inspirada no ResetExplode (Windows).
 
 **Status: em desenvolvimento.** Prontos até agora (com testes): utilidades, informações de sistema/CPU/RAM/monitores,
 PCI, configurações com gravação atômica, sensores (hwmon/RAPL), GPU (NVIDIA/AMD/Intel) e discos com S.M.A.R.T.
@@ -13,15 +13,15 @@ cargo test
 
 ## Aparência da TUI (theme.json)
 
-As cores e símbolos da interface são configuráveis por JSON em `~/.config/resetexplode/theme.json`.
+As cores e símbolos da interface são configuráveis por JSON em `~/.config/pingu/theme.json`.
 
 > **Fonte (tipo/tamanho da letra):** o programa roda dentro do terminal, então a fonte é do seu
 > emulador de terminal (GNOME Terminal, Konsole, Alacritty, kitty...). O JSON controla cores,
 > negrito/itálico/sublinhado, bordas e símbolos.
 
 ```sh
-resetexplode theme --list                      # presets: padrao, claro, contraste, retro, neon
-resetexplode theme --preset neon --write       # grava o preset como theme.json para editar
+pingu theme --list                      # presets: padrao, claro, contraste, retro, neon
+pingu theme --preset neon --write       # grava o preset como theme.json para editar
 ```
 
 Campos: `accent`, `muted`, `ok`, `warn`, `err`, `selection_fg`, `selection_bg`, `border`, `border_focus`,

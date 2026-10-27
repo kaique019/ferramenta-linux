@@ -1,20 +1,20 @@
 [package]
-name = "resetexplode"
+name = "pingu"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "RESET EXPLODE para Linux: informações do sistema, sensores, benchmarks, stress e ferramentas de PC (TUI + CLI) em Rust"
+description = "Pingu: ferramentas de hardware para Linux: informações do sistema, sensores, benchmarks, stress e ferramentas de PC (TUI + CLI) em Rust"
 license = "MIT"
 readme = "README.md"
 keywords = ["hardware", "benchmark", "tui", "linux", "sensors"]
 categories = ["command-line-utilities", "hardware-support"]
 
 [lib]
-name = "resetexplode"
+name = "pingu"
 path = "src/lib.rs"
 
 [[bin]]
-name = "resetexplode"
+name = "pingu"
 path = "src/main.rs"
 
 [dependencies]

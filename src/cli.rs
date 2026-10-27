@@ -14,7 +14,7 @@ use crate::settings::{OverlayConfig, SettingsStore};
 use crate::{autostart, games, gpu, launch, report, hwerrors, installer, network, occheck, overlay, pci, power, sensors, serial, storage, stress, sysinfo, tweaks};
 
 #[derive(Parser, Debug)]
-#[command(name = "resetexplode", version, about = "RESET EXPLODE para Linux: informações, sensores, benchmarks e stress")]
+#[command(name = "pingu", version, about = "Pingu: ferramentas de hardware para Linux: informações, sensores, benchmarks e stress")]
 pub struct Cli {
     /// Saída em JSON (para scripts)
     #[arg(long, global = true)]
@@ -82,7 +82,7 @@ pub enum Command {
     },
     /// Relatório do sistema em HTML (ou JSON com --json)
     Report {
-        /// Arquivo de saída (padrão: ~/resetexplode-AAAAMMDD.html)
+        /// Arquivo de saída (padrão: ~/pingu-AAAAMMDD.html)
         #[arg(long)]
         out: Option<PathBuf>,
         /// Inclui o SMART dos discos (precisa de sudo)
@@ -439,7 +439,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if json {
                 return print_json(&rep);
             }
-            let path = out.unwrap_or_else(|| crate::util::home_dir().join(format!("resetexplode-{}.html", crate::util::now_local("%Y%m%d"))));
+            let path = out.unwrap_or_else(|| crate::util::home_dir().join(format!("pingu-{}.html", crate::util::now_local("%Y%m%d"))));
             crate::util::write_atomic(&path, report::to_html(&rep).as_bytes()).with_context(|| format!("não consegui gravar {}", path.display()))?;
             println!("Relatório gravado em {}", path.display());
             Ok(())
@@ -941,19 +941,19 @@ mod tests {
 
     #[test]
     fn parses_global_json_flag_anywhere() {
-        let c = Cli::try_parse_from(["resetexplode", "info", "--json"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "info", "--json"]).unwrap();
         assert!(c.json && matches!(c.command, Some(Command::Info)));
-        let c = Cli::try_parse_from(["resetexplode", "--json", "bench", "disk", "--mb", "64", "--secs", "0.5"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "--json", "bench", "disk", "--mb", "64", "--secs", "0.5"]).unwrap();
         assert!(c.json);
         assert!(matches!(c.command, Some(Command::Bench { which: Bench::Disk { mb: 64, .. } })));
     }
 
     #[test]
     fn parses_power_and_net() {
-        let c = Cli::try_parse_from(["resetexplode", "power", "--governor", "performance", "--boost", "off"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "power", "--governor", "performance", "--boost", "off"]).unwrap();
         assert!(matches!(c.command, Some(Command::Power { governor: Some(_), boost: Some(_), .. })));
-        assert!(Cli::try_parse_from(["resetexplode", "power", "--boost", "talvez"]).is_err());
-        let c = Cli::try_parse_from(["resetexplode", "net", "--test"]).unwrap();
+        assert!(Cli::try_parse_from(["pingu", "power", "--boost", "talvez"]).is_err());
+        let c = Cli::try_parse_from(["pingu", "net", "--test"]).unwrap();
         assert!(matches!(c.command, Some(Command::Net { test: true, .. })));
     }
 
@@ -966,29 +966,29 @@ mod tests {
 
     #[test]
     fn game_args_may_start_with_a_hyphen() {
-        let c = Cli::try_parse_from(["resetexplode", "games", "add", "Jogo", "/bin/true", "--args", "--base -x"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "games", "add", "Jogo", "/bin/true", "--args", "--base -x"]).unwrap();
         assert!(matches!(c.command, Some(Command::Games { action: GameAction::Add { ref args, .. } }) if args == "--base -x"));
-        let c = Cli::try_parse_from(["resetexplode", "games", "set", "portal", "--extra", "-novid -console", "--gamemode", "true"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "games", "set", "portal", "--extra", "-novid -console", "--gamemode", "true"]).unwrap();
         assert!(matches!(c.command, Some(Command::Games { action: GameAction::Set { gamemode: Some(true), .. } })));
     }
 
     #[test]
     fn parses_theme_command() {
-        let c = Cli::try_parse_from(["resetexplode", "theme", "--preset", "retro", "--write", "--force"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "theme", "--preset", "retro", "--write", "--force"]).unwrap();
         assert!(matches!(c.command, Some(Command::Theme { write: true, force: true, preset: Some(_), .. })));
     }
 
     #[test]
     fn stress_defaults_are_safe() {
-        let c = Cli::try_parse_from(["resetexplode", "stress"]).unwrap();
+        let c = Cli::try_parse_from(["pingu", "stress"]).unwrap();
         let Some(Command::Stress { secs, ram, no_cpu, max_temp, .. }) = c.command else { panic!() };
         assert_eq!((secs, ram, no_cpu, max_temp), (60, false, false, 90.0));
     }
 
     #[test]
     fn rejects_unknown_subcommand_and_nothing_to_stress() {
-        assert!(Cli::try_parse_from(["resetexplode", "explodir"]).is_err());
-        let c = Cli::try_parse_from(["resetexplode", "stress", "--no-cpu"]).unwrap();
+        assert!(Cli::try_parse_from(["pingu", "explodir"]).is_err());
+        let c = Cli::try_parse_from(["pingu", "stress", "--no-cpu"]).unwrap();
         assert!(run(c).is_err());
     }
 }

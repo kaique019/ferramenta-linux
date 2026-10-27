@@ -23,7 +23,7 @@ pub const METRICS: &[(&str, &str, &str)] = &[
 
 pub const DEFAULT_ITEMS: &[&str] = &["fps", "frametime", "cpu_load", "cpu_temp", "gpu_load", "gpu_temp", "vram", "ram"];
 
-const MARKER: &str = "# gerado por resetexplode";
+const MARKER: &str = "# gerado por pingu";
 
 fn position(corner: &str) -> &'static str {
     match corner {

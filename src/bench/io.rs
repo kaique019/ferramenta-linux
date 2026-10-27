@@ -164,11 +164,11 @@ pub struct TempDir {
 }
 
 impl TempDir {
-    /// Cria `<parent>/.resetexplode-bench-<pid>-<n>`. Falha se já existir, para nunca apagar dados de outra pessoa.
+    /// Cria `<parent>/.pingu-bench-<pid>-<n>`. Falha se já existir, para nunca apagar dados de outra pessoa.
     pub fn create_in(parent: &Path) -> io::Result<TempDir> {
         use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
         static N: AtomicU32 = AtomicU32::new(0);
-        let path = parent.join(format!(".resetexplode-bench-{}-{}", std::process::id(), N.fetch_add(1, Relaxed)));
+        let path = parent.join(format!(".pingu-bench-{}-{}", std::process::id(), N.fetch_add(1, Relaxed)));
         std::fs::create_dir(&path)?;
         Ok(TempDir { path })
     }

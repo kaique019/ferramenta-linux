@@ -39,7 +39,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     let [top, body, foot] = Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(2)]).areas(area);
     let titles: Vec<Line> = TABS.iter().enumerate().map(|(i, t)| Line::from(format!("{} {}", i + 1, t.title()))).collect();
-    let tabs = Tabs::new(titles).select(app.tab.index()).block(th.block(" RESET EXPLODE ")).highlight_style(th.selection()).divider(th.divider.as_str());
+    let tabs = Tabs::new(titles).select(app.tab.index()).block(th.block(" PINGU ")).highlight_style(th.selection()).divider(th.divider.as_str());
     f.render_widget(tabs, top);
     match app.tab {
         Tab::Resumo => resumo(f, app, body),
@@ -216,7 +216,7 @@ pub fn disk_lines(app: &App) -> Vec<Line<'static>> {
         }
     }
     v.push(Line::from(""));
-    v.push(Line::from(Span::styled("SMART detalhado: `resetexplode disks --smart` (precisa de sudo).", th.muted())));
+    v.push(Line::from(Span::styled("SMART detalhado: `pingu disks --smart` (precisa de sudo).", th.muted())));
     v
 }
 
@@ -269,7 +269,7 @@ pub fn net_lines(app: &App) -> Vec<Line<'static>> {
             v.push(Line::from(format!("{:<12} {:<9} {:<8} {} {}", i.name, i.kind, if i.up { "ativa" } else { "inativa" }, i.speed_mbps.map(|s| format!("{s} Mb/s")).unwrap_or_default(), i.driver.clone().unwrap_or_default())));
         }
         v.push(kv(th, "DNS", if s.dns.is_empty() { "—".to_string() } else { s.dns.join(", ") }));
-        v.push(Line::from(Span::styled("Latência, velocidade e bufferbloat: `resetexplode net --test`.", th.muted())));
+        v.push(Line::from(Span::styled("Latência, velocidade e bufferbloat: `pingu net --test`.", th.muted())));
         v.push(Line::from(""));
         v.push(heading(th, "Portas seriais USB"));
         for p in &s.ports {
@@ -340,7 +340,7 @@ fn games(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
     let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
     if app.games.is_empty() {
-        f.render_widget(Paragraph::new(vec![Line::from("Nenhum jogo encontrado (Steam, Heroic, Lutris)."), Line::from(""), Line::from("Adicione um manualmente com:"), Line::from("  resetexplode games add \"Nome\" /caminho/do/executavel")]).block(th.block(" Jogos ")).wrap(Wrap { trim: true }), area);
+        f.render_widget(Paragraph::new(vec![Line::from("Nenhum jogo encontrado (Steam, Heroic, Lutris)."), Line::from(""), Line::from("Adicione um manualmente com:"), Line::from("  pingu games add \"Nome\" /caminho/do/executavel")]).block(th.block(" Jogos ")).wrap(Wrap { trim: true }), area);
         return;
     }
     let items: Vec<ListItem> = app.games.iter().map(|g| ListItem::new(format!("{} · {}", trunc(&g.name, 30), g.source.name()))).collect();

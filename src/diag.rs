@@ -31,7 +31,7 @@ fn store() -> &'static Mutex<VecDeque<Entry>> {
 /// Registra uma mensagem. As mais antigas são descartadas quando passa de 300.
 pub fn log(level: Level, source: &str, message: impl Into<String>) {
     let message = message.into();
-    if std::env::var_os("RESETEXPLODE_DEBUG").is_some() {
+    if std::env::var_os("PINGU_DEBUG").is_some() {
         eprintln!("[{level:?}] {source}: {message}");
     }
     if let Ok(mut q) = store().lock() {

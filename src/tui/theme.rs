@@ -3,7 +3,7 @@
 //! O tipo de letra em si é do emulador de terminal e o programa não consegue trocá-lo; aqui se controla tudo o que é
 //! do programa: cores (nome, `#rrggbb` ou número 0-255), negrito, itálico, sublinhado, bordas e símbolos.
 //!
-//! `~/.config/resetexplode/theme.json` pode ter `"preset"` (base) e qualquer campo para sobrescrever. Campo
+//! `~/.config/pingu/theme.json` pode ter `"preset"` (base) e qualquer campo para sobrescrever. Campo
 //! desconhecido ou cor inválida não derruba o programa: ele avisa e usa o tema padrão.
 
 use std::path::Path;
