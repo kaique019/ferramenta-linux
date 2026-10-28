@@ -90,6 +90,8 @@ pub struct App {
     pub scroll: [u16; 8],
     /// Rolagem máxima da aba atual, calculada ao desenhar.
     pub max_scroll: Cell<u16>,
+    /// densidade do último quadro desenhado (preenchida por `ui::draw`)
+    pub dense: Cell<ui::Dense>,
     pub job_sel: usize,
     pub job: Option<Running>,
     pub job_result: Option<(JobKind, jobs::Done)>,
@@ -128,6 +130,7 @@ impl App {
             cpu_history: vec![],
             scroll: [0; 8],
             max_scroll: Cell::new(0),
+            dense: Cell::new(ui::Dense::default()),
             job_sel: 0,
             job: None,
             job_result: None,
@@ -620,11 +623,45 @@ mod tests {
     }
 
     #[test]
-    fn small_terminal_shows_a_message_instead_of_garbage() {
+    fn layout_adapts_to_the_terminal_instead_of_giving_up() {
         let d = tempfile::tempdir().unwrap();
-        let app = App::new(test_env(d.path()));
+        let mut app = app_with_data(d.path());
+        // 40x10 antes só mostrava "terminal pequeno"; agora desenha a aba com o layout mínimo
+        app.tab = Tab::Resumo;
         let t = text_of(&app, 40, 10);
-        assert!(t.contains("Terminal pequeno") && t.contains("60x14"));
+        assert!(!t.contains("Janela pequena"), "{t}");
+        assert!(t.contains("CPU") && t.contains("RAM"), "{t}");
+        // estreito: painéis empilhados (Agora acima de Sistema), todos os botões dos jogos um por linha
+        let t = text_of(&app, 70, 30);
+        assert!(t.find("Agora").unwrap() < t.find("Sistema").unwrap(), "{t}");
+        // largo: lado a lado (Sistema à esquerda, na mesma linha de Agora)
+        let t = text_of(&app, 120, 30);
+        let line = t.lines().find(|l| l.contains("Sistema")).unwrap();
+        assert!(line.contains("Agora"), "{t}");
+        // testes: lista e detalhes continuam acessíveis em 50x14
+        app.tab = Tab::Testes;
+        let t = text_of(&app, 50, 14);
+        assert!(t.contains("Testes") && t.contains("Detalhes"), "{t}");
+        // ferramentas em pouca altura: um painel por vez, com indicação de como trocar
+        app.tab = Tab::Ferramentas;
+        let t = text_of(&app, 60, 12);
+        assert!(t.contains("1/3"), "{t}");
+        app.tool_panel = 1;
+        assert!(text_of(&app, 60, 12).contains("2/3"));
+        // só o mínimo absoluto mostra o aviso
+        let t = text_of(&app, 20, 4);
+        assert!(t.contains("Janela pequena") && t.contains("24x6"), "{t}");
+    }
+
+    #[test]
+    fn narrow_terminals_keep_scrolling_inside_the_visible_area() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        app.tab = Tab::Sensores;
+        let _ = text_of(&app, 50, 12);
+        let small = app.max_scroll.get();
+        let _ = text_of(&app, 120, 60);
+        assert!(app.max_scroll.get() <= small, "janela maior rola menos");
     }
 
     #[test]

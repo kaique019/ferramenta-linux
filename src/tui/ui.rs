@@ -29,17 +29,71 @@ fn waiting(th: &Theme) -> Vec<Line<'static>> {
     vec![Line::from(Span::styled("Coletando dados...", th.muted()))]
 }
 
+/// Quanto espaço o terminal oferece. A interface se adapta sozinha: painéis lado a lado passam a ficar
+/// empilhados, bordas e cabeçalho encolhem e a barra de atalhos fica mais curta. (O tamanho da letra é do
+/// terminal e o programa não consegue mudá-lo; o que ele ajusta é o que desenha.)
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub struct Dense {
+    /// menos de 80 colunas: painéis lado a lado ficam um sobre o outro
+    pub narrow: bool,
+    /// menos de 24 linhas: cabeçalho e rodapé de uma linha só
+    pub short: bool,
+    /// bem pequeno: sem bordas, só o título de cada painel
+    pub tiny: bool,
+}
+
+pub fn dense(a: Rect) -> Dense {
+    Dense { narrow: a.width < 80, short: a.height < 24, tiny: a.width < 64 || a.height < 16 }
+}
+
+/// Abaixo disto nem o modo mínimo cabe.
+pub const MIN_W: u16 = 24;
+pub const MIN_H: u16 = 6;
+
+fn blk<'a>(app: &App, title: impl Into<Line<'a>>) -> Block<'a> {
+    fblk(app, title, false)
+}
+
+fn fblk<'a>(app: &App, title: impl Into<Line<'a>>, focused: bool) -> Block<'a> {
+    let th = &app.theme;
+    if app.dense.get().tiny {
+        let l: Line = title.into();
+        Block::new().title(l.style(if focused { th.selection() } else { th.heading() }))
+    } else {
+        th.focus_block(title, focused)
+    }
+}
+
+/// Divide a área em dois painéis: lado a lado, ou um sobre o outro quando o terminal é estreito.
+/// `first_pct` vale para o lado a lado; empilhado, o primeiro ocupa `first_rows` linhas (no máximo metade).
+fn split2(d: Dense, area: Rect, first_pct: u16, first_rows: u16) -> [Rect; 2] {
+    if d.narrow {
+        Layout::vertical([Constraint::Length(first_rows.min(area.height / 2).max(3)), Constraint::Min(2)]).areas(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(first_pct), Constraint::Percentage(100 - first_pct)]).areas(area)
+    }
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let th = &app.theme;
     let area = f.area();
-    if area.width < 60 || area.height < 14 {
-        let msg = format!("Terminal pequeno ({}x{}).\nAumente a janela para pelo menos 60x14.\n(q sai)", area.width, area.height);
+    if area.width < MIN_W || area.height < MIN_H {
+        let msg = format!("Janela pequena ({}x{}).\nMínimo {MIN_W}x{MIN_H}. (q sai)", area.width, area.height);
         f.render_widget(Paragraph::new(msg).wrap(Wrap { trim: true }), area);
         return;
     }
-    let [top, body, foot] = Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(2)]).areas(area);
-    let titles: Vec<Line> = TABS.iter().enumerate().map(|(i, t)| Line::from(format!("{} {}", i + 1, t.title()))).collect();
-    let tabs = Tabs::new(titles).select(app.tab.index()).block(th.block(" PINGU ")).highlight_style(th.selection()).divider(th.divider.as_str());
+    let d = dense(area);
+    app.dense.set(d);
+    let compact = d.short || d.tiny;
+    let (top_h, foot_h) = if compact { (1, 1) } else { (3, 2) };
+    let [top, body, foot] = Layout::vertical([Constraint::Length(top_h), Constraint::Min(1), Constraint::Length(foot_h)]).areas(area);
+    // abas: com pouco espaço só a ativa mostra o nome, as outras viram só o número
+    let full_names = area.width >= 100;
+    let titles: Vec<Line> = TABS.iter().enumerate().map(|(i, t)| if full_names || i == app.tab.index() { Line::from(format!("{} {}", i + 1, t.title())) } else { Line::from((i + 1).to_string()) }).collect();
+    let mut tabs = Tabs::new(titles).select(app.tab.index()).highlight_style(th.selection()).divider(th.divider.as_str());
+    if !compact {
+        tabs = tabs.block(th.block(" PINGU "));
+    }
     f.render_widget(tabs, top);
     match app.tab {
         Tab::Resumo => resumo(f, app, body),
@@ -56,29 +110,44 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn footer(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
+    let short = area.width < 80;
+    let hint = match (app.tab, short) {
+        (Tab::Testes, false) => "↑↓ escolher · Enter iniciar · Esc cancela · Tab/1-8 abas · q sai",
+        (Tab::Testes, true) => "↑↓ · Enter · Esc · Tab · q",
+        (Tab::Jogos, false) => "↑↓ · g gamemode · m mangohud · d dGPU · p perf. · i prioridade · Enter iniciar · r recarregar · q sai",
+        (Tab::Jogos, true) => "↑↓ · g m d p i · Enter · Tab · q",
+        (Tab::Ferramentas, false) => "←→ painel · ↑↓ · Enter aplica/desfaz/instala · r atualizar · Tab/1-8 abas · q sai",
+        (Tab::Ferramentas, true) => "←→ painel · ↑↓ · Enter · Tab · q",
+        (_, false) => "↑↓ PgUp/PgDn rolar · ←→ ou Tab/1-8 trocar de aba · t tema · q sai",
+        (_, true) => "↑↓ rolar · ←→ aba · t tema · q",
+    };
+    let status = app.status.as_ref().map(|(lv, t)| (match lv { Level::Info => th.accent, Level::Ok => th.ok, Level::Err => th.err }, t));
+    if area.height < 2 {
+        // uma linha só: a mensagem de status tem prioridade sobre os atalhos
+        match status {
+            Some((c, t)) => f.render_widget(Paragraph::new(Span::styled(trunc(t, area.width as usize), Style::new().fg(c))), area),
+            None => f.render_widget(Paragraph::new(Span::styled(trunc(hint, area.width as usize), th.muted())), area),
+        }
+        return;
+    }
     let [l1, l2] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    if let Some((lv, t)) = &app.status {
-        let c = match lv { Level::Info => th.accent, Level::Ok => th.ok, Level::Err => th.err };
+    if let Some((c, t)) = status {
         f.render_widget(Paragraph::new(Span::styled(trunc(t, area.width as usize), Style::new().fg(c))), l1);
     }
-    let hint = match app.tab {
-        Tab::Testes => "↑↓ escolher · Enter iniciar · Esc cancela · Tab/1-8 abas · q sai",
-        Tab::Jogos => "↑↓ · g gamemode · m mangohud · d dGPU · p perf. · i prioridade · Enter iniciar · r recarregar · q sai",
-        Tab::Ferramentas => "←→ painel · ↑↓ · Enter aplica/desfaz/instala · r atualizar · Tab/1-8 abas · q sai",
-        _ => "↑↓ PgUp/PgDn rolar · ←→ ou Tab/1-8 trocar de aba · t tema · q sai",
-    };
     f.render_widget(Paragraph::new(Span::styled(trunc(hint, area.width as usize), th.muted())), l2);
 }
 
 /// Texto com rolagem; calcula a rolagem máxima para o teclado não passar do fim.
 fn scrolled(f: &mut Frame, app: &App, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     let th = &app.theme;
-    let view = area.height.saturating_sub(2);
-    let max = (lines.len() as u16).saturating_sub(view);
+    let probe = blk(app, "");
+    let view = probe.inner(area).height;
+    let max = (lines.len().min(u16::MAX as usize) as u16).saturating_sub(view);
     app.max_scroll.set(max);
     let y = app.scroll[app.tab.index()].min(max);
     let shown = if max > 0 { format!(" {title} ({}/{}) ", y + 1, max + 1) } else { format!(" {title} ") };
-    f.render_widget(Paragraph::new(lines).block(th.block(shown)).scroll((y, 0)), area);
+    let _ = th;
+    f.render_widget(Paragraph::new(lines).block(blk(app, shown)).scroll((y, 0)), area);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -117,16 +186,24 @@ pub fn system_lines(app: &App) -> Vec<Line<'static>> {
 
 fn resumo(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
-    let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
-    f.render_widget(Paragraph::new(system_lines(app)).block(th.block(" Sistema ")).wrap(Wrap { trim: true }), left);
-    let block = th.block(" Agora ");
+    let d = app.dense.get();
+    // estreito: "Agora" (medidores) em cima, porque é o que muda; "Sistema" ocupa o resto
+    let (left, right) = if d.narrow {
+        let [r, l] = split2(d, area, 50, 7);
+        (l, r)
+    } else {
+        let [l, r] = split2(d, area, 50, 0);
+        (l, r)
+    };
+    f.render_widget(Paragraph::new(system_lines(app)).block(blk(app, " Sistema ")).wrap(Wrap { trim: true }), left);
+    let block = blk(app, " Agora ");
     let inner = block.inner(right);
     f.render_widget(block, right);
     let Some(l) = &app.live else {
         f.render_widget(Paragraph::new(waiting(th)), inner);
         return;
     };
-    let [g1, g2, g3, spark, rest] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(4), Constraint::Min(0)]).areas(inner);
+    let [g1, g2, g3, spark, rest] = Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1), Constraint::Length(if inner.height >= 10 { 4 } else { 0 }), Constraint::Min(0)]).areas(inner);
     gauge(f, th, g1, "CPU ", l.cpu.total, format!("{:.0}%", l.cpu.total));
     let used = l.mem.total.saturating_sub(l.mem.available);
     let mem_pct = if l.mem.total > 0 { used as f64 / l.mem.total as f64 * 100.0 } else { 0.0 };
@@ -293,16 +370,17 @@ fn list_state(sel: usize) -> ListState {
 
 fn tests(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
-    let [left, right] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(area);
+    let d = app.dense.get();
+    let [left, right] = split2(d, area, 40, jobs::ALL.len() as u16 + 2);
     let items: Vec<ListItem> = jobs::ALL.iter().map(|k| ListItem::new(k.title())).collect();
-    let list = List::new(items).block(th.block(" Testes ")).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
+    let list = List::new(items).block(blk(app, " Testes ")).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
     f.render_stateful_widget(list, left, &mut list_state(app.job_sel));
 
-    let block = th.block(" Detalhes ");
+    let block = blk(app, " Detalhes ");
     let inner = block.inner(right);
     f.render_widget(block, right);
     let kind = jobs::ALL[app.job_sel.min(jobs::ALL.len() - 1)];
-    let [desc, prog, res] = Layout::vertical([Constraint::Length(4), Constraint::Length(3), Constraint::Min(0)]).areas(inner);
+    let [desc, prog, res] = Layout::vertical([Constraint::Length(if d.narrow { 5 } else { 4 }), Constraint::Length(3), Constraint::Min(0)]).areas(inner);
     let mut d = vec![Line::from(kind.desc())];
     if kind.heavy() {
         d.push(Line::from(Span::styled("Carga pesada: o PC pode esquentar e as ventoinhas vão subir.", th.warn())));
@@ -338,19 +416,29 @@ fn running(f: &mut Frame, th: &Theme, j: &Running, area: Rect) {
 
 fn games(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
-    let [left, right] = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area);
+    let d = app.dense.get();
+    let [left, right] = split2(d, area, 45, app.games.len().min(5) as u16 + 2);
     if app.games.is_empty() {
-        f.render_widget(Paragraph::new(vec![Line::from("Nenhum jogo encontrado (Steam, Heroic, Lutris)."), Line::from(""), Line::from("Adicione um manualmente com:"), Line::from("  pingu games add \"Nome\" /caminho/do/executavel")]).block(th.block(" Jogos ")).wrap(Wrap { trim: true }), area);
+        f.render_widget(Paragraph::new(vec![Line::from("Nenhum jogo encontrado (Steam, Heroic, Lutris)."), Line::from(""), Line::from("Adicione um manualmente com:"), Line::from("  pingu games add \"Nome\" /caminho/do/executavel")]).block(blk(app, " Jogos ")).wrap(Wrap { trim: true }), area);
         return;
     }
     let items: Vec<ListItem> = app.games.iter().map(|g| ListItem::new(format!("{} · {}", trunc(&g.name, 30), g.source.name()))).collect();
-    let list = List::new(items).block(th.block(format!(" Jogos ({}) ", app.games.len()))).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
+    let list = List::new(items).block(blk(app, format!(" Jogos ({}) ", app.games.len()))).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
     f.render_stateful_widget(list, left, &mut list_state(app.game_sel));
     let Some(g) = app.games.get(app.game_sel) else { return };
     let p = app.profile_of(g);
     let mut v = vec![heading(th, &g.name), kv(th, "Origem", g.source.name()), kv(th, "Pasta", g.install_dir.clone().unwrap_or_else(|| "—".into())), Line::from("")];
-    v.push(Line::from(format!("{} GameMode (g)   {} MangoHud (m)   {} GPU dedicada (d)", th.check(p.gamemode), th.check(p.mangohud), th.check(p.dgpu))));
-    v.push(Line::from(format!("{} Governador performance (p)   Prioridade (i): {}", th.check(p.performance_governor), p.priority)));
+    if d.narrow {
+        // estreito: um botão por linha em vez de vários na mesma
+        v.push(Line::from(format!("{} GameMode (g)", th.check(p.gamemode))));
+        v.push(Line::from(format!("{} MangoHud (m)", th.check(p.mangohud))));
+        v.push(Line::from(format!("{} GPU dedicada (d)", th.check(p.dgpu))));
+        v.push(Line::from(format!("{} Governador performance (p)", th.check(p.performance_governor))));
+        v.push(Line::from(format!("Prioridade (i): {}", p.priority)));
+    } else {
+        v.push(Line::from(format!("{} GameMode (g)   {} MangoHud (m)   {} GPU dedicada (d)", th.check(p.gamemode), th.check(p.mangohud), th.check(p.dgpu))));
+        v.push(Line::from(format!("{} Governador performance (p)   Prioridade (i): {}", th.check(p.performance_governor), p.priority)));
+    }
     v.push(Line::from(""));
     match launch::plan(&p, app.live.as_ref().and_then(|l| crate::gpu::primary(&l.gpus)).map(|g| g.vendor), crate::util::is_root(), &crate::util::have) {
         Ok(pl) if g.steam_appid.is_some() => {
@@ -364,7 +452,7 @@ fn games(f: &mut Frame, app: &App, area: Rect) {
         }
         Err(e) => v.push(Line::from(Span::styled(format!("perfil inválido: {e}"), th.err()))),
     }
-    f.render_widget(Paragraph::new(v).block(th.block(" Perfil ")).wrap(Wrap { trim: false }), right);
+    f.render_widget(Paragraph::new(v).block(blk(app, " Perfil ")).wrap(Wrap { trim: false }), right);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -373,8 +461,15 @@ fn games(f: &mut Frame, app: &App, area: Rect) {
 
 fn tools(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
-    let panels = Layout::vertical([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)]).split(area);
-    let titles = [" Ajustes de sistema (valem até reiniciar) ", " Programas de inicialização ", " Instalar utilitários "];
+    let d = app.dense.get();
+    // pouca altura: mostra só o painel em foco (←→ troca) em vez de três painéis minúsculos
+    let single = area.height < 18;
+    let panels = if single { [area; 3].to_vec() } else { Layout::vertical([Constraint::Percentage(34), Constraint::Percentage(33), Constraint::Percentage(33)]).split(area).to_vec() };
+    let full = [" Ajustes de sistema (valem até reiniciar) ", " Programas de inicialização ", " Instalar utilitários "];
+    let short = [" Ajustes ", " Inicialização ", " Utilitários "];
+    let names = if d.narrow || single { short } else { full };
+    let single_titles: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{}[{}/3 ←→] ", n.trim_end(), i + 1)).collect();
+    let titles: Vec<&str> = if single { single_titles.iter().map(|s| s.as_str()).collect() } else { names.to_vec() };
     let rows: [Vec<ListItem>; 3] = [
         app.tweaks.iter().map(|t| ListItem::new(format!("{} {:<20} {} → {}  {}", th.check(t.applied), t.id, t.current.clone().unwrap_or_else(|| "—".into()), t.recommended, if !t.available { "(indisponível)" } else if t.can_restore { "(restaurável)" } else { "" }))).collect(),
         app.startup.iter().map(|e| ListItem::new(format!("{} {:<30} {}", th.check(e.enabled), trunc(&e.name, 30), if e.system { "(sistema)" } else { "" }))).collect(),
@@ -382,11 +477,14 @@ fn tools(f: &mut Frame, app: &App, area: Rect) {
     ];
     for (i, items) in rows.into_iter().enumerate() {
         let focused = app.tool_panel == i;
+        if single && !focused {
+            continue;
+        }
         let empty = items.is_empty();
         let blank = " ".repeat(th.pointer.chars().count());
-        let list = List::new(items).block(th.focus_block(titles[i], focused)).highlight_style(if focused { th.selection() } else { Style::new() }).highlight_symbol(if focused { th.pointer.as_str() } else { blank.as_str() });
+        let list = List::new(items).block(fblk(app, titles[i], focused)).highlight_style(if focused { th.selection() } else { Style::new() }).highlight_symbol(if focused { th.pointer.as_str() } else { blank.as_str() });
         if empty {
-            f.render_widget(Paragraph::new("(vazio)").block(th.focus_block(titles[i], focused)), panels[i]);
+            f.render_widget(Paragraph::new("(vazio)").block(fblk(app, titles[i], focused)), panels[i]);
         } else {
             f.render_stateful_widget(list, panels[i], &mut list_state(app.tool_sel[i]));
         }
