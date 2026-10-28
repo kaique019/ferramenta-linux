@@ -17,6 +17,7 @@ pub mod occheck;
 pub mod overlay;
 pub mod pci;
 pub mod power;
+pub mod procs;
 pub mod sensors;
 pub mod settings;
 pub mod storage;

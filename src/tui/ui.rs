@@ -4,14 +4,26 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Sparkline, Tabs, Wrap};
 
 use super::jobs::{self, Running};
 use super::theme::Theme;
-use super::{App, Level, TABS, Tab};
+use super::{App, Level, ListId, TABS, Tab};
 use crate::launch;
 use crate::sensors::SensorKind;
 use crate::util::{fmt_bytes, fmt_duration, fmt_mhz, trunc};
+
+/// Barra de texto de largura fixa: `█████░░░░░`.
+pub fn bar(pct: f64, width: usize) -> String {
+    let filled = ((pct.clamp(0.0, 100.0) / 100.0) * width as f64).round() as usize;
+    format!("{}{}", "█".repeat(filled.min(width)), "░".repeat(width - filled.min(width)))
+}
+
+/// Um caractere de altura proporcional (▁ a █) para mostrar o uso de cada núcleo numa linha só.
+fn level_glyph(pct: f64) -> char {
+    const G: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    G[((pct.clamp(0.0, 100.0) / 100.0) * 7.0).round() as usize]
+}
 
 fn heading(th: &Theme, t: &str) -> Line<'static> {
     Line::from(Span::styled(t.to_string(), th.heading()))
@@ -82,19 +94,34 @@ pub fn draw(f: &mut Frame, app: &App) {
         f.render_widget(Paragraph::new(msg).wrap(Wrap { trim: true }), area);
         return;
     }
+    *app.hits.borrow_mut() = Default::default();
     let d = dense(area);
     app.dense.set(d);
     let compact = d.short || d.tiny;
     let (top_h, foot_h) = if compact { (1, 1) } else { (3, 2) };
     let [top, body, foot] = Layout::vertical([Constraint::Length(top_h), Constraint::Min(1), Constraint::Length(foot_h)]).areas(area);
     // abas: com pouco espaço só a ativa mostra o nome, as outras viram só o número
-    let full_names = area.width >= 100;
+    let full_names = area.width >= 120;
     let titles: Vec<Line> = TABS.iter().enumerate().map(|(i, t)| if full_names || i == app.tab.index() { Line::from(format!("{} {}", i + 1, t.title())) } else { Line::from((i + 1).to_string()) }).collect();
     let mut tabs = Tabs::new(titles).select(app.tab.index()).highlight_style(th.selection()).divider(th.divider.as_str());
+    let mut tab_area = top;
     if !compact {
-        tabs = tabs.block(th.block(" PINGU "));
+        let b = th.block(" PINGU ").title_top(Line::from(Span::styled(format!(" v{} · ? ajuda ", env!("CARGO_PKG_VERSION")), th.muted())).right_aligned());
+        tab_area = b.inner(top);
+        tabs = tabs.block(b);
     }
     f.render_widget(tabs, top);
+    // áreas clicáveis das abas: cada uma tem 1 espaço de cada lado do nome e o divisor entre elas
+    let mut x = tab_area.x;
+    let right = tab_area.x + tab_area.width;
+    for (i, t) in TABS.iter().enumerate() {
+        let w = if full_names || i == app.tab.index() { format!("{} {}", i + 1, t.title()).chars().count() } else { (i + 1).to_string().len() } as u16 + 2;
+        if x >= right {
+            break;
+        }
+        app.hits.borrow_mut().tabs.push((Rect::new(x, tab_area.y, w.min(right - x), 1), *t));
+        x += w + th.divider.chars().count() as u16;
+    }
     match app.tab {
         Tab::Resumo => resumo(f, app, body),
         Tab::Sensores => scrolled(f, app, body, "Sensores", sensor_lines(app)),
@@ -104,22 +131,32 @@ pub fn draw(f: &mut Frame, app: &App) {
         Tab::Testes => tests(f, app, body),
         Tab::Jogos => games(f, app, body),
         Tab::Ferramentas => tools(f, app, body),
+        Tab::Processos => {
+            let by = app.proc_sort;
+            let title = format!("Processos (por {} · c CPU · m memória)", if by == crate::procs::SortBy::Cpu { "CPU" } else { "memória" });
+            scrolled(f, app, body, &title, proc_lines(app))
+        }
     }
     footer(f, app, foot);
+    if app.help {
+        help(f, app, area);
+    }
 }
 
 fn footer(f: &mut Frame, app: &App, area: Rect) {
     let th = &app.theme;
     let short = area.width < 80;
     let hint = match (app.tab, short) {
-        (Tab::Testes, false) => "↑↓ escolher · Enter iniciar · Esc cancela · Tab/1-8 abas · q sai",
+        (Tab::Processos, false) => "↑↓ PgUp/PgDn rolar · c ordenar por CPU · m por memória · Tab/1-9 abas · ? ajuda · q sai",
+        (Tab::Processos, true) => "↑↓ · c CPU · m mem · ? · q",
+        (Tab::Testes, false) => "↑↓ escolher · Enter iniciar · Esc cancela · Tab/1-9 abas · ? ajuda · q sai",
         (Tab::Testes, true) => "↑↓ · Enter · Esc · Tab · q",
-        (Tab::Jogos, false) => "↑↓ · g gamemode · m mangohud · d dGPU · p perf. · i prioridade · Enter iniciar · r recarregar · q sai",
+        (Tab::Jogos, false) => "↑↓ · g gamemode · m mangohud · d dGPU · p perf. · i prioridade · Enter iniciar · ? ajuda · q sai",
         (Tab::Jogos, true) => "↑↓ · g m d p i · Enter · Tab · q",
-        (Tab::Ferramentas, false) => "←→ painel · ↑↓ · Enter aplica/desfaz/instala · r atualizar · Tab/1-8 abas · q sai",
+        (Tab::Ferramentas, false) => "←→ painel · ↑↓ · Enter aplica/desfaz/instala · r atualizar · Tab/1-9 abas · ? ajuda · q sai",
         (Tab::Ferramentas, true) => "←→ painel · ↑↓ · Enter · Tab · q",
-        (_, false) => "↑↓ PgUp/PgDn rolar · ←→ ou Tab/1-8 trocar de aba · t tema · q sai",
-        (_, true) => "↑↓ rolar · ←→ aba · t tema · q",
+        (_, false) => "↑↓ PgUp/PgDn rolar · ←→ ou Tab/1-9 trocar de aba · t tema · ? ajuda · q sai",
+        (_, true) => "↑↓ rolar · ←→ aba · ? ajuda · q",
     };
     let status = app.status.as_ref().map(|(lv, t)| (match lv { Level::Info => th.accent, Level::Ok => th.ok, Level::Err => th.err }, t));
     if area.height < 2 {
@@ -211,8 +248,23 @@ fn resumo(f: &mut Frame, app: &App, area: Rect) {
     let swap_used = l.mem.swap_total.saturating_sub(l.mem.swap_free);
     let swap_pct = if l.mem.swap_total > 0 { swap_used as f64 / l.mem.swap_total as f64 * 100.0 } else { 0.0 };
     gauge(f, th, g3, "Swap", swap_pct, if l.mem.swap_total == 0 { "sem swap".into() } else { format!("{} / {}", fmt_bytes(swap_used), fmt_bytes(l.mem.swap_total)) });
-    f.render_widget(Sparkline::default().data(&app.cpu_history).max(100).style(th.accent_style()).block(Block::new().borders(Borders::TOP).title(" CPU (últimos minutos) ")), spark);
+    let cpu_spark = Sparkline::default().data(&app.cpu_history).max(100).style(th.accent_style()).block(Block::new().borders(Borders::TOP).title(" CPU (últimos minutos) "));
+    if spark.width >= 50 {
+        let [a, b] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(spark);
+        f.render_widget(cpu_spark, a);
+        f.render_widget(Sparkline::default().data(&app.mem_history).max(100).style(Style::new().fg(th.ok)).block(Block::new().borders(Borders::TOP).title(" RAM ")), b);
+    } else {
+        f.render_widget(cpu_spark, spark);
+    }
     let mut lines = vec![];
+    if !l.cpu.per_core.is_empty() {
+        let mut spans = vec![Span::styled(format!("{:<14}", "Núcleos"), th.muted())];
+        spans.extend(l.cpu.per_core.iter().take(inner.width.saturating_sub(16) as usize).map(|c| Span::styled(level_glyph(*c).to_string(), Style::new().fg(th.level_color(*c)))));
+        lines.push(Line::from(spans));
+    }
+    if let Some(s) = &app.stat {
+        lines.push(kv(th, "Carga média", s.os.load_avg.map(|(a, b, c)| format!("{a:.2} {b:.2} {c:.2}")).unwrap_or_else(|| "—".into())));
+    }
     if let Some(t) = crate::sensors::cpu_temperature(&l.sensors) {
         lines.push(Line::from(vec![Span::styled(format!("{:<14}", "Temp. CPU"), th.muted()), Span::styled(format!("{t:.0} °C"), Style::new().fg(th.temp_color(t)))]));
     }
@@ -289,7 +341,7 @@ pub fn disk_lines(app: &App) -> Vec<Line<'static>> {
         v.push(heading(th, "Volumes montados"));
         for m in &l.mounts {
             let pct = if m.total > 0 { m.used as f64 / m.total as f64 * 100.0 } else { 0.0 };
-            v.push(Line::from(vec![Span::raw(format!("{:<26} {:<7} ", trunc(&m.mountpoint, 26), m.fstype)), Span::styled(format!("{:>3.0}%", pct), Style::new().fg(th.level_color(pct))), Span::raw(format!("  {} de {}", fmt_bytes(m.used), fmt_bytes(m.total)))]));
+            v.push(Line::from(vec![Span::raw(format!("{:<26} {:<7} ", trunc(&m.mountpoint, 26), m.fstype)), Span::styled(bar(pct, 12), Style::new().fg(th.level_color(pct))), Span::styled(format!(" {:>3.0}%", pct), Style::new().fg(th.level_color(pct))), Span::raw(format!("  {} de {}", fmt_bytes(m.used), fmt_bytes(m.total)))]));
         }
     }
     v.push(Line::from(""));
@@ -374,7 +426,9 @@ fn tests(f: &mut Frame, app: &App, area: Rect) {
     let [left, right] = split2(d, area, 40, jobs::ALL.len() as u16 + 2);
     let items: Vec<ListItem> = jobs::ALL.iter().map(|k| ListItem::new(k.title())).collect();
     let list = List::new(items).block(blk(app, " Testes ")).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
-    f.render_stateful_widget(list, left, &mut list_state(app.job_sel));
+    let mut st = list_state(app.job_sel);
+    f.render_stateful_widget(list, left, &mut st);
+    app.hits.borrow_mut().lists.push((blk(app, "").inner(left), ListId::Jobs, st.offset(), jobs::ALL.len()));
 
     let block = blk(app, " Detalhes ");
     let inner = block.inner(right);
@@ -424,20 +478,28 @@ fn games(f: &mut Frame, app: &App, area: Rect) {
     }
     let items: Vec<ListItem> = app.games.iter().map(|g| ListItem::new(format!("{} · {}", trunc(&g.name, 30), g.source.name()))).collect();
     let list = List::new(items).block(blk(app, format!(" Jogos ({}) ", app.games.len()))).highlight_style(th.selection()).highlight_symbol(th.pointer.as_str());
-    f.render_stateful_widget(list, left, &mut list_state(app.game_sel));
+    let mut st = list_state(app.game_sel);
+    f.render_stateful_widget(list, left, &mut st);
+    app.hits.borrow_mut().lists.push((blk(app, "").inner(left), ListId::Games, st.offset(), app.games.len()));
     let Some(g) = app.games.get(app.game_sel) else { return };
     let p = app.profile_of(g);
-    let mut v = vec![heading(th, &g.name), kv(th, "Origem", g.source.name()), kv(th, "Pasta", g.install_dir.clone().unwrap_or_else(|| "—".into())), Line::from("")];
-    if d.narrow {
-        // estreito: um botão por linha em vez de vários na mesma
-        v.push(Line::from(format!("{} GameMode (g)", th.check(p.gamemode))));
-        v.push(Line::from(format!("{} MangoHud (m)", th.check(p.mangohud))));
-        v.push(Line::from(format!("{} GPU dedicada (d)", th.check(p.dgpu))));
-        v.push(Line::from(format!("{} Governador performance (p)", th.check(p.performance_governor))));
-        v.push(Line::from(format!("Prioridade (i): {}", p.priority)));
-    } else {
-        v.push(Line::from(format!("{} GameMode (g)   {} MangoHud (m)   {} GPU dedicada (d)", th.check(p.gamemode), th.check(p.mangohud), th.check(p.dgpu))));
-        v.push(Line::from(format!("{} Governador performance (p)   Prioridade (i): {}", th.check(p.performance_governor), p.priority)));
+    let inner = blk(app, "").inner(right);
+    let pasta = trunc(&g.install_dir.clone().unwrap_or_else(|| "—".into()), (inner.width as usize).saturating_sub(15).max(8));
+    let mut v = vec![heading(th, &trunc(&g.name, inner.width as usize)), kv(th, "Origem", g.source.name()), kv(th, "Pasta", pasta), Line::from("")];
+    // um botão por linha: clicar equivale a apertar a tecla indicada
+    let buttons = [
+        ('g', format!("{} GameMode (g)", th.check(p.gamemode))),
+        ('m', format!("{} MangoHud (m)", th.check(p.mangohud))),
+        ('d', format!("{} GPU dedicada (d)", th.check(p.dgpu))),
+        ('p', format!("{} Governador performance (p)", th.check(p.performance_governor))),
+        ('i', format!("Prioridade (i): {}", p.priority)),
+    ];
+    for (c, label) in buttons {
+        let y = inner.y + v.len() as u16;
+        if y < inner.y + inner.height {
+            app.hits.borrow_mut().buttons.push((Rect::new(inner.x, y, (label.chars().count() as u16).min(inner.width), 1), c));
+        }
+        v.push(Line::from(label));
     }
     v.push(Line::from(""));
     match launch::plan(&p, app.live.as_ref().and_then(|l| crate::gpu::primary(&l.gpus)).map(|g| g.vendor), crate::util::is_root(), &crate::util::have) {
@@ -470,6 +532,7 @@ fn tools(f: &mut Frame, app: &App, area: Rect) {
     let names = if d.narrow || single { short } else { full };
     let single_titles: Vec<String> = names.iter().enumerate().map(|(i, n)| format!("{}[{}/3 ←→] ", n.trim_end(), i + 1)).collect();
     let titles: Vec<&str> = if single { single_titles.iter().map(|s| s.as_str()).collect() } else { names.to_vec() };
+    let lens = [app.tweaks.len(), app.startup.len(), app.apps.len()];
     let rows: [Vec<ListItem>; 3] = [
         app.tweaks.iter().map(|t| ListItem::new(format!("{} {:<20} {} → {}  {}", th.check(t.applied), t.id, t.current.clone().unwrap_or_else(|| "—".into()), t.recommended, if !t.available { "(indisponível)" } else if t.can_restore { "(restaurável)" } else { "" }))).collect(),
         app.startup.iter().map(|e| ListItem::new(format!("{} {:<30} {}", th.check(e.enabled), trunc(&e.name, 30), if e.system { "(sistema)" } else { "" }))).collect(),
@@ -486,7 +549,61 @@ fn tools(f: &mut Frame, app: &App, area: Rect) {
         if empty {
             f.render_widget(Paragraph::new("(vazio)").block(fblk(app, titles[i], focused)), panels[i]);
         } else {
-            f.render_stateful_widget(list, panels[i], &mut list_state(app.tool_sel[i]));
+            let mut st = list_state(app.tool_sel[i]);
+            f.render_stateful_widget(list, panels[i], &mut st);
+            app.hits.borrow_mut().lists.push((fblk(app, "", focused).inner(panels[i]), ListId::Tool(i), st.offset(), lens[i]));
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Processos e ajuda
+// ---------------------------------------------------------------------------------------------
+
+pub fn proc_lines(app: &App) -> Vec<Line<'static>> {
+    let th = &app.theme;
+    let Some(l) = &app.live else { return waiting(th) };
+    if l.procs.is_empty() {
+        return vec![Line::from("Não consegui ler /proc (sem processos para mostrar).")];
+    }
+    let mut v = vec![Line::from(Span::styled(format!("{:>7} {:>7} {:>11}  {}", "PID", "CPU", "Memória", "Nome"), th.heading()))];
+    for p in crate::procs::top(l.procs.clone(), app.proc_sort, 200) {
+        v.push(Line::from(vec![
+            Span::raw(format!("{:>7} ", p.pid)),
+            Span::styled(format!("{:>6.1}%", p.cpu), Style::new().fg(th.level_color(p.cpu.min(100.0)))),
+            Span::raw(format!(" {:>11}  {}", fmt_bytes(p.rss), p.name)),
+        ]));
+    }
+    v
+}
+
+fn help(f: &mut Frame, app: &App, area: Rect) {
+    let th = &app.theme;
+    let key = |k: &str, t: &str| Line::from(vec![Span::styled(format!("{k:<16}"), th.accent_style()), Span::raw(t.to_string())]);
+    let lines = vec![
+        heading(th, "Em qualquer aba"),
+        key("Tab / Shift+Tab", "próxima / anterior aba (ou ←→ e os números 1-9)"),
+        key("↑↓ PgUp PgDn", "rolar ou escolher; Home/End vão ao início/fim"),
+        key("t / T", "t troca de tema (temporário); T recarrega o theme.json"),
+        key("? / F1", "esta ajuda; Esc ou qualquer tecla fecha"),
+        key("q / Ctrl+C", "sair (Ctrl+C e Esc cancelam um teste em andamento)"),
+        Line::from(""),
+        heading(th, "Por aba"),
+        key("Testes", "Enter inicia · Esc cancela"),
+        key("Jogos", "g GameMode · m MangoHud · d GPU dedicada · p governador · i prioridade · Enter inicia"),
+        key("Ferramentas", "←→ muda de painel · Enter aplica/desfaz/instala · r atualiza"),
+        key("Processos", "c ordena por CPU · m ordena por memória"),
+        Line::from(""),
+        heading(th, "Mouse"),
+        key("Clique", "abas, itens das listas e os botões dos jogos"),
+        key("Duplo clique", "inicia o teste ou o jogo (como Enter)"),
+        key("Roda", "rola o texto ou muda a seleção"),
+        Line::from(""),
+        Line::from(Span::styled("A fonte e o tamanho da letra são do seu terminal (Ctrl +/-).", th.muted())),
+    ];
+    let w = area.width.saturating_sub(4).min(86);
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let r = Rect::new(area.x + (area.width.saturating_sub(w)) / 2, area.y + (area.height.saturating_sub(h)) / 2, w, h);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(lines).block(th.focus_block(" Ajuda ", true)).wrap(Wrap { trim: true }), r);
 }

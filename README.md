@@ -36,3 +36,10 @@ empilhados e os botões (GameMode, MangoHud...) passam a uma linha cada; abaixo 
 e o rodapé encolhem para uma linha e as abas mostram só o número; em terminais bem pequenos somem as
 bordas e a aba Ferramentas mostra um painel por vez (←→ troca). O mínimo é 24x6. O tamanho da letra
 continua sendo do terminal (Ctrl+- costuma diminuí-la), o programa não consegue mudá-lo.
+
+### Atalhos e mouse
+
+`?` (ou F1) abre a ajuda dentro da TUI. Há uma aba **Processos** (9) com os que mais usam CPU ou memória
+(`c`/`m` ordenam), medidores de CPU e RAM com histórico e uso por núcleo no Resumo, e suporte a mouse:
+clique em abas, listas e botões; duplo clique inicia um teste ou jogo; a roda rola. Temas extras: `oceano`,
+`pinguim` e `dracula`.

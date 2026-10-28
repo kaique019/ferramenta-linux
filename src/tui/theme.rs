@@ -12,7 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, BorderType};
 use serde::{Deserialize, Serialize};
 
-pub const PRESETS: [&str; 5] = ["padrao", "claro", "contraste", "retro", "neon"];
+pub const PRESETS: [&str; 8] = ["padrao", "claro", "contraste", "retro", "neon", "oceano", "pinguim", "dracula"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
@@ -94,6 +94,9 @@ pub fn preset(name: &str) -> Option<Theme> {
         "contraste" => Theme { name: "contraste".into(), accent: Color::White, muted: Color::Gray, ok: Color::LightGreen, warn: Color::LightYellow, err: Color::LightRed, sel_fg: Color::Black, sel_bg: Color::White, border: Color::White, border_focus: Color::LightYellow, gauge_bg: Color::DarkGray, underline_selection: true, pointer: ">> ".into(), ..base },
         "retro" => Theme { name: "retro".into(), accent: rgb(0x33ff33), muted: rgb(0x1a9c1a), ok: rgb(0x33ff33), warn: rgb(0xb8ff33), err: rgb(0xff5555), sel_fg: Color::Black, sel_bg: rgb(0x33ff33), border: rgb(0x1a9c1a), border_focus: rgb(0x33ff33), gauge_bg: rgb(0x062406), pointer: "> ".into(), check_on: "[x]".into(), divider: "|".into(), ..base },
         "neon" => Theme { name: "neon".into(), accent: rgb(0xff4fd8), muted: rgb(0x7a7aa0), ok: rgb(0x39ff88), warn: rgb(0xffd23f), err: rgb(0xff4d6d), sel_fg: Color::Black, sel_bg: rgb(0xff4fd8), border: rgb(0x5b5b8c), border_focus: rgb(0x00e5ff), gauge_bg: rgb(0x1b1b2f), rounded: true, italic_muted: true, ..base },
+        "oceano" => Theme { name: "oceano".into(), accent: rgb(0x4fc3f7), muted: rgb(0x6b8ba4), ok: rgb(0x4dd0a8), warn: rgb(0xffd166), err: rgb(0xff6b6b), sel_fg: rgb(0x06202e), sel_bg: rgb(0x4fc3f7), border: rgb(0x2f5d7c), border_focus: rgb(0x4fc3f7), gauge_bg: rgb(0x0d2b3e), rounded: true, ..base },
+        "pinguim" => Theme { name: "pinguim".into(), accent: rgb(0xffa630), muted: rgb(0x8a94a6), ok: rgb(0x7bd88f), warn: rgb(0xffd166), err: rgb(0xff6b6b), sel_fg: rgb(0x10151f), sel_bg: rgb(0xffa630), border: rgb(0x3b4a63), border_focus: rgb(0xffa630), gauge_bg: rgb(0x1a2233), rounded: true, pointer: "› ".into(), ..base },
+        "dracula" => Theme { name: "dracula".into(), accent: rgb(0xbd93f9), muted: rgb(0x6272a4), ok: rgb(0x50fa7b), warn: rgb(0xf1fa8c), err: rgb(0xff5555), sel_fg: rgb(0x282a36), sel_bg: rgb(0xbd93f9), border: rgb(0x44475a), border_focus: rgb(0xff79c6), gauge_bg: rgb(0x343746), rounded: true, ..base },
         _ => return None,
     })
 }

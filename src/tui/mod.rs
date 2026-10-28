@@ -10,12 +10,13 @@ pub mod jobs;
 pub mod theme;
 mod ui;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use crate::games::{self, Game, Source};
 use crate::settings::{GameProfile, StartupBackup};
@@ -34,9 +35,10 @@ pub enum Tab {
     Testes,
     Jogos,
     Ferramentas,
+    Processos,
 }
 
-pub const TABS: [Tab; 8] = [Tab::Resumo, Tab::Sensores, Tab::Discos, Tab::Gpu, Tab::Rede, Tab::Testes, Tab::Jogos, Tab::Ferramentas];
+pub const TABS: [Tab; 9] = [Tab::Resumo, Tab::Sensores, Tab::Discos, Tab::Gpu, Tab::Rede, Tab::Testes, Tab::Jogos, Tab::Ferramentas, Tab::Processos];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -49,6 +51,7 @@ impl Tab {
             Tab::Testes => "Testes",
             Tab::Jogos => "Jogos",
             Tab::Ferramentas => "Ferramentas",
+            Tab::Processos => "Processos",
         }
     }
 
@@ -81,13 +84,41 @@ pub enum Effect {
 /// Instalação em andamento: nome do programa e a tarefa que o instala.
 pub type InstallTask = (String, Task<(), Result<(), String>>);
 
+/// Qual lista da tela um clique do mouse acertou.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ListId {
+    Jobs,
+    Games,
+    Tool(usize),
+}
+
+/// Áreas clicáveis do último quadro desenhado (preenchidas por `ui::draw`).
+#[derive(Default, Clone, Debug)]
+pub struct Hits {
+    pub tabs: Vec<(Rect, Tab)>,
+    /// área interna da lista, qual lista, primeiro item visível e quantidade de itens
+    pub lists: Vec<(Rect, ListId, usize, usize)>,
+    /// botões que equivalem a apertar uma tecla (ex.: 'g' liga o GameMode)
+    pub buttons: Vec<(Rect, char)>,
+}
+
+fn inside(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+}
+
 pub struct App {
     pub env: Env,
     pub tab: Tab,
     pub stat: Option<Box<Static>>,
     pub live: Option<Box<Live>>,
     pub cpu_history: Vec<u64>,
-    pub scroll: [u16; 8],
+    pub mem_history: Vec<u64>,
+    pub scroll: [u16; 9],
+    pub proc_sort: crate::procs::SortBy,
+    /// janela de ajuda aberta (F1 ou ?)
+    pub help: bool,
+    pub hits: RefCell<Hits>,
+    last_click: Option<(std::time::Instant, u16, u16)>,
     /// Rolagem máxima da aba atual, calculada ao desenhar.
     pub max_scroll: Cell<u16>,
     /// densidade do último quadro desenhado (preenchida por `ui::draw`)
@@ -110,6 +141,10 @@ pub struct App {
     pub quit: bool,
 }
 
+fn key_press(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
 fn step(sel: usize, len: usize, down: bool) -> usize {
     if len == 0 {
         0
@@ -128,7 +163,12 @@ impl App {
             stat: None,
             live: None,
             cpu_history: vec![],
-            scroll: [0; 8],
+            mem_history: vec![],
+            proc_sort: Default::default(),
+            help: false,
+            hits: RefCell::new(Hits::default()),
+            last_click: None,
+            scroll: [0; 9],
             max_scroll: Cell::new(0),
             dense: Cell::new(ui::Dense::default()),
             job_sel: 0,
@@ -163,8 +203,12 @@ impl App {
             Msg::Static(s) => self.stat = Some(s),
             Msg::Live(l) => {
                 self.cpu_history.push(l.cpu.total.clamp(0.0, 100.0) as u64);
-                if self.cpu_history.len() > 120 {
-                    self.cpu_history.remove(0);
+                let mem_pct = if l.mem.total > 0 { l.mem.total.saturating_sub(l.mem.available) as f64 / l.mem.total as f64 * 100.0 } else { 0.0 };
+                self.mem_history.push(mem_pct.clamp(0.0, 100.0) as u64);
+                for h in [&mut self.cpu_history, &mut self.mem_history] {
+                    if h.len() > 120 {
+                        h.remove(0);
+                    }
                 }
                 self.live = Some(l);
             }
@@ -288,7 +332,20 @@ impl App {
             return Effect::None;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.help {
+            // a ajuda fecha com qualquer tecla; Ctrl-C ainda sai
+            if matches!(key.code, KeyCode::Char('c') if ctrl) {
+                self.quit = true;
+                return Effect::Quit;
+            }
+            self.help = false;
+            return Effect::None;
+        }
         match key.code {
+            KeyCode::F(1) | KeyCode::Char('?') => {
+                self.help = true;
+                return Effect::None;
+            }
             KeyCode::Char('c') if ctrl => {
                 if !self.cancel_job() {
                     self.quit = true;
@@ -324,7 +381,7 @@ impl App {
                 self.rotate(false);
                 return Effect::None;
             }
-            KeyCode::Char(c @ '1'..='8') if !ctrl => {
+            KeyCode::Char(c @ '1'..='9') if !ctrl => {
                 self.goto(TABS[c as usize - '1' as usize]);
                 return Effect::None;
             }
@@ -352,8 +409,69 @@ impl App {
             KeyCode::End => *s = max,
             KeyCode::Right | KeyCode::Char('l') => self.rotate(true),
             KeyCode::Left | KeyCode::Char('h') => self.rotate(false),
+            KeyCode::Char('c') if self.tab == Tab::Processos => self.proc_sort = crate::procs::SortBy::Cpu,
+            KeyCode::Char('m') if self.tab == Tab::Processos => self.proc_sort = crate::procs::SortBy::Mem,
             _ => {}
         }
+    }
+
+    /// Mouse: roda rola ou muda a seleção, clique em aba/lista/botão faz o mesmo que o teclado,
+    /// duplo clique em teste ou jogo inicia (como Enter).
+    pub fn on_mouse(&mut self, m: MouseEvent) -> Effect {
+        if self.help {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.help = false;
+            }
+            return Effect::None;
+        }
+        let hits = self.hits.borrow().clone();
+        let (x, y) = (m.column, m.row);
+        match m.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let down = m.kind == MouseEventKind::ScrollDown;
+                if let Some((_, ListId::Tool(i), ..)) = hits.lists.iter().find(|(r, ..)| inside(*r, x, y)) {
+                    self.tool_panel = *i;
+                }
+                let code = if down { KeyCode::Down } else { KeyCode::Up };
+                // texto rola de 3 em 3 linhas; listas andam de 1 em 1
+                let n = if matches!(self.tab, Tab::Testes | Tab::Jogos | Tab::Ferramentas) { 1 } else { 3 };
+                for _ in 0..n {
+                    self.on_key(key_press(code));
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((_, t)) = hits.tabs.iter().find(|(r, _)| inside(*r, x, y)) {
+                    self.goto(*t);
+                    return Effect::None;
+                }
+                if let Some((_, c)) = hits.buttons.iter().find(|(r, _)| inside(*r, x, y)) {
+                    return self.on_key(key_press(KeyCode::Char(*c)));
+                }
+                if let Some((r, id, off, len)) = hits.lists.iter().find(|(r, ..)| inside(*r, x, y)) {
+                    let idx = off + (y - r.y) as usize;
+                    if idx < *len {
+                        match id {
+                            ListId::Jobs => self.job_sel = idx,
+                            ListId::Games => self.game_sel = idx,
+                            ListId::Tool(i) => {
+                                self.tool_panel = *i;
+                                self.tool_sel[*i] = idx;
+                            }
+                        }
+                        let now = std::time::Instant::now();
+                        let double = self.last_click.is_some_and(|(t, cx, cy)| cx == x && cy == y && now.duration_since(t) < Duration::from_millis(450));
+                        self.last_click = Some((now, x, y));
+                        // duplo clique age como Enter, mas só em testes e jogos (nunca aplica ajustes do sistema por engano)
+                        if double && matches!(id, ListId::Jobs | ListId::Games) {
+                            self.last_click = None;
+                            return self.on_key(key_press(KeyCode::Enter));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Effect::None
     }
 
     fn key_tests(&mut self, key: KeyEvent) {
@@ -507,7 +625,7 @@ impl App {
 
 /// Executa um jogo fora da Steam: sai da tela cheia, roda com o perfil e volta, mostrando o resultado.
 fn run_game_outside(req: &LaunchReq, app: &mut App) {
-    ratatui::restore();
+    restore_term();
     println!("Iniciando {}... (Ctrl-C encerra o jogo)\n", req.name);
     let dgpu = app.live.as_ref().and_then(|l| crate::gpu::primary(&l.gpus)).map(|g| g.vendor);
     let cancel = crate::cli::cancel_on_ctrl_c();
@@ -526,8 +644,28 @@ fn run_game_outside(req: &LaunchReq, app: &mut App) {
     app.set_status(Level::Info, msg);
 }
 
+/// Entra na tela cheia com captura de mouse; se o programa cair (panic), o mouse também é devolvido.
+fn init_term() -> ratatui::DefaultTerminal {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    let t = ratatui::init();
+    HOOK.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = ratatui::crossterm::execute!(io::stdout(), DisableMouseCapture);
+            prev(info);
+        }));
+    });
+    let _ = ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture);
+    t
+}
+
+fn restore_term() {
+    let _ = ratatui::crossterm::execute!(io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+}
+
 fn event_loop(app: &mut App, rx: &Receiver<Msg>) -> io::Result<()> {
-    let mut terminal = ratatui::init();
+    let mut terminal = init_term();
     let result = (|| -> io::Result<()> {
         loop {
             while let Ok(m) = rx.try_recv() {
@@ -538,20 +676,24 @@ fn event_loop(app: &mut App, rx: &Receiver<Msg>) -> io::Result<()> {
             if app.quit {
                 return Ok(());
             }
-            if event::poll(Duration::from_millis(100))?
-                && let Event::Key(k) = event::read()? {
-                    match app.on_key(k) {
-                        Effect::Quit => return Ok(()),
-                        Effect::Launch(req) => {
-                            run_game_outside(&req, app);
-                            terminal = ratatui::init();
-                        }
-                        Effect::None => {}
+            if event::poll(Duration::from_millis(100))? {
+                let effect = match event::read()? {
+                    Event::Key(k) => app.on_key(k),
+                    Event::Mouse(m) => app.on_mouse(m),
+                    _ => Effect::None,
+                };
+                match effect {
+                    Effect::Quit => return Ok(()),
+                    Effect::Launch(req) => {
+                        run_game_outside(&req, app);
+                        terminal = init_term();
                     }
+                    Effect::None => {}
                 }
+            }
         }
     })();
-    ratatui::restore();
+    restore_term();
     result
 }
 
@@ -602,7 +744,7 @@ mod tests {
         let env = test_env(d);
         let mut app = App::new(env.clone());
         app.apply(Msg::Static(Box::new(data::collect_static(&env))));
-        let mut s = crate::sensors::CpuSampler::new(&env.roots);
+        let mut s = data::Samplers::new(&env.roots);
         app.apply(Msg::Live(Box::new(data::collect_live(&env, &mut s))));
         app
     }
@@ -653,6 +795,110 @@ mod tests {
         assert!(t.contains("Janela pequena") && t.contains("24x6"), "{t}");
     }
 
+    fn click(x: u16, y: u16) -> MouseEvent {
+        MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row: y, modifiers: KeyModifiers::NONE }
+    }
+
+    fn wheel(down: bool) -> MouseEvent {
+        MouseEvent { kind: if down { MouseEventKind::ScrollDown } else { MouseEventKind::ScrollUp }, column: 5, row: 5, modifiers: KeyModifiers::NONE }
+    }
+
+    #[test]
+    fn mouse_clicks_tabs_lists_and_game_buttons() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        let _ = text_of(&app, 130, 40);
+        // clicar no nome de uma aba troca de aba
+        let (r, t) = app.hits.borrow().tabs.iter().find(|(_, t)| *t == Tab::Testes).copied().unwrap();
+        app.on_mouse(click(r.x + 2, r.y));
+        assert_eq!(app.tab, t);
+        // clicar num item da lista de testes seleciona; duplo clique inicia (aqui vira "já há teste" com um falso em andamento)
+        let _ = text_of(&app, 130, 40);
+        let (lr, ..) = app.hits.borrow().lists.iter().find(|(_, id, ..)| *id == ListId::Jobs).copied().unwrap();
+        app.on_mouse(click(lr.x + 3, lr.y + 2));
+        assert_eq!(app.job_sel, 2);
+        // clique fora dos itens (abaixo do último) não muda nada
+        app.on_mouse(click(lr.x + 3, lr.y + lr.height - 1));
+        assert!(app.job_sel < jobs::ALL.len());
+        // roda do mouse move a seleção da lista
+        app.on_mouse(wheel(false));
+        assert_eq!(app.job_sel, 1);
+        // jogos: botão clicável liga o GameMode
+        put(&d.path().join("cfg/x"), "");
+        app.env.store.update(|s| s.custom_games.push(CustomGame { name: "Jogo".into(), exe: "/bin/true".into(), args: String::new() })).unwrap();
+        app.reload_games();
+        app.goto(Tab::Jogos);
+        let _ = text_of(&app, 130, 40);
+        let (br, c) = app.hits.borrow().buttons.iter().find(|(_, c)| *c == 'g').copied().unwrap();
+        let before = app.profile_of(&app.games[0].clone()).gamemode;
+        app.on_mouse(click(br.x + 1, br.y));
+        assert_eq!(c, 'g');
+        assert_ne!(app.profile_of(&app.games[0].clone()).gamemode, before);
+        // clicar fora de qualquer área é ignorado
+        assert!(matches!(app.on_mouse(click(0, 39)), Effect::None));
+    }
+
+    #[test]
+    fn double_click_on_a_game_launches_but_on_a_tweak_it_only_selects() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        app.env.store.update(|s| s.custom_games.push(CustomGame { name: "Jogo".into(), exe: "/bin/true".into(), args: String::new() })).unwrap();
+        app.reload_games();
+        app.goto(Tab::Jogos);
+        let _ = text_of(&app, 130, 40);
+        let (lr, ..) = app.hits.borrow().lists.iter().find(|(_, id, ..)| *id == ListId::Games).copied().unwrap();
+        assert!(matches!(app.on_mouse(click(lr.x + 2, lr.y)), Effect::None), "um clique só seleciona");
+        assert!(matches!(app.on_mouse(click(lr.x + 2, lr.y)), Effect::Launch(_)), "duplo clique inicia");
+        app.goto(Tab::Ferramentas);
+        let _ = text_of(&app, 130, 40);
+        let (tr, ..) = app.hits.borrow().lists.iter().find(|(_, id, ..)| matches!(id, ListId::Tool(0))).copied().unwrap();
+        app.status = None;
+        for _ in 0..2 {
+            app.on_mouse(click(tr.x + 2, tr.y));
+        }
+        assert!(app.status.is_none(), "duplo clique em ajuste não aplica nada");
+    }
+
+    #[test]
+    fn help_opens_with_question_mark_and_closes_with_any_key() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        app.on_key(key(KeyCode::Char('?')));
+        assert!(app.help);
+        let t = text_of(&app, 100, 30);
+        assert!(t.contains("Ajuda") && t.contains("Duplo clique"), "{t}");
+        // com a ajuda aberta, 'q' só fecha a ajuda
+        assert!(matches!(app.on_key(key(KeyCode::Char('q'))), Effect::None) && !app.help && !app.quit);
+        app.on_key(key(KeyCode::F(1)));
+        assert!(app.help);
+        app.on_mouse(click(1, 1));
+        assert!(!app.help);
+        app.on_key(key(KeyCode::F(1)));
+        assert!(matches!(app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), Effect::Quit));
+        // ajuda cabe em janela pequena sem estourar
+        let mut app = app_with_data(d.path());
+        app.help = true;
+        let _ = text_of(&app, 30, 8);
+    }
+
+    #[test]
+    fn processes_tab_lists_and_sorts() {
+        let d = tempfile::tempdir().unwrap();
+        let mut app = app_with_data(d.path());
+        app.goto(Tab::Processos);
+        let live = app.live.as_mut().unwrap();
+        live.procs = vec![
+            crate::procs::Proc { pid: 1, name: "leve".into(), cpu: 1.0, rss: 900 << 20 },
+            crate::procs::Proc { pid: 2, name: "pesado".into(), cpu: 80.0, rss: 10 << 20 },
+        ];
+        let t = text_of(&app, 100, 20);
+        assert!(t.find("pesado").unwrap() < t.find("leve").unwrap(), "{t}");
+        app.on_key(key(KeyCode::Char('m')));
+        let t = text_of(&app, 100, 20);
+        assert!(t.find("leve").unwrap() < t.find("pesado").unwrap(), "{t}");
+        assert!(t.contains("memória"));
+    }
+
     #[test]
     fn narrow_terminals_keep_scrolling_inside_the_visible_area() {
         let d = tempfile::tempdir().unwrap();
@@ -672,11 +918,14 @@ mod tests {
         assert_eq!(app.tab, Tab::Sensores);
         app.on_key(key(KeyCode::BackTab));
         app.on_key(key(KeyCode::BackTab));
-        assert_eq!(app.tab, Tab::Ferramentas, "volta do início para o fim");
+        assert_eq!(app.tab, Tab::Processos, "volta do início para o fim");
         app.on_key(key(KeyCode::Char('6')));
         assert_eq!(app.tab, Tab::Testes);
+        app.on_key(key(KeyCode::Char('0')));
+        assert_eq!(app.tab, Tab::Testes, "0 não existe");
         app.on_key(key(KeyCode::Char('9')));
-        assert_eq!(app.tab, Tab::Testes, "9 não existe");
+        assert_eq!(app.tab, Tab::Processos);
+        app.on_key(key(KeyCode::Char('6')));
         app.on_key(key(KeyCode::Right));
         assert_eq!(app.tab, Tab::Jogos);
     }

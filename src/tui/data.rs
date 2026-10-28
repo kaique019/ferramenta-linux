@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::settings::SettingsStore;
+use crate::procs::{Proc, ProcSampler};
 use crate::sensors::{CpuLoad, CpuSampler, SensorReading};
 use crate::util::Roots;
 use crate::{autostart, gpu, network, power, sensors, serial, storage, sysinfo};
@@ -49,6 +50,19 @@ pub struct Live {
     pub gpus: Vec<gpu::GpuInfo>,
     pub power: power::PowerInfo,
     pub mounts: Vec<storage::Mount>,
+    pub procs: Vec<Proc>,
+}
+
+/// Amostradores que guardam a leitura anterior para calcular uso por diferença.
+pub struct Samplers {
+    pub cpu: CpuSampler,
+    pub procs: ProcSampler,
+}
+
+impl Samplers {
+    pub fn new(r: &Roots) -> Self {
+        Samplers { cpu: CpuSampler::new(r), procs: ProcSampler::new(r) }
+    }
 }
 
 pub enum Msg {
@@ -63,9 +77,9 @@ pub fn collect_static(env: &Env) -> Static {
     Static { os: sysinfo::collect_os(r), board: sysinfo::collect_board(r), cpu: sysinfo::collect_cpu(r), disks: storage::collect_disks(r, false), displays: sysinfo::collect_displays(r), interfaces: network::interfaces(r), dns: network::dns_servers(r), ports, serial_advice }
 }
 
-pub fn collect_live(env: &Env, sampler: &mut CpuSampler) -> Live {
+pub fn collect_live(env: &Env, sampler: &mut Samplers) -> Live {
     let r = &env.roots;
-    Live { cpu: sampler.sample(), mem: sysinfo::collect_mem(r, false), sensors: sensors::read_all(r), gpus: gpu::collect(r), power: power::collect(r), mounts: storage::collect_mounts(r) }
+    Live { cpu: sampler.cpu.sample(), mem: sysinfo::collect_mem(r, false), sensors: sensors::read_all(r), gpus: gpu::collect(r), power: power::collect(r), mounts: storage::collect_mounts(r), procs: sampler.procs.sample() }
 }
 
 /// Inicia as threads de coleta. Elas terminam sozinhas quando o receptor é descartado.
@@ -76,7 +90,7 @@ pub fn spawn_collectors(env: Env, every: Duration) -> Receiver<Msg> {
         let _ = t1.send(Msg::Static(Box::new(collect_static(&e1))));
     });
     thread::spawn(move || {
-        let mut sampler = CpuSampler::new(&env.roots);
+        let mut sampler = Samplers::new(&env.roots);
         loop {
             let live = collect_live(&env, &mut sampler);
             if tx.send(Msg::Live(Box::new(live))).is_err() {
