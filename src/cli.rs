@@ -696,8 +696,15 @@ fn games_cmd(roots: &Roots, action: GameAction, json: bool) -> Result<()> {
                 }
                 return Ok(());
             }
-            let exe = p.exe_path.clone().or_else(|| g.exe.clone()).context("este jogo não tem executável conhecido (defina com `games add`)")?;
-            let base = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
+            let via_heroic = if p.exe_path.is_none() { games::heroic_launch(g, &crate::util::home_dir(), &crate::util::have) } else { None };
+            let (exe, base) = match via_heroic {
+                Some(x) => x,
+                None => {
+                    let exe = p.exe_path.clone().or_else(|| g.exe.clone()).context("este jogo não tem executável conhecido (defina com `games add`; jogos do Heroic precisam do Heroic instalado)")?;
+                    let base = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
+                    (exe, base)
+                }
+            };
             let cancel = cancel_on_ctrl_c();
             let o = launch::run(&p, &exe, &base, dgpu, &cancel).map_err(anyhow::Error::msg)?;
             for w in &o.warnings {

@@ -43,3 +43,10 @@ continua sendo do terminal (Ctrl+- costuma diminuí-la), o programa não consegu
 (`c`/`m` ordenam), medidores de CPU e RAM com histórico e uso por núcleo no Resumo, e suporte a mouse:
 clique em abas, listas e botões; duplo clique inicia um teste ou jogo; a roda rola. Temas extras: `oceano`,
 `pinguim` e `dracula`.
+
+### Jogos do Heroic
+
+Epic, GOG e jogos avulsos do Heroic aparecem na aba Jogos (instalação normal, Flatpak e Snap). Enter (ou
+`pingu games launch "Nome"`) abre o jogo pelo próprio Heroic (`heroic://launch/<runner>/<jogo>`), que cuida
+do Wine/Proton e do prefixo. GameMode/MangoHud/prioridade do perfil valem para o processo que o Pingu inicia;
+se o Heroic já estiver aberto, ele repassa o pedido à instância em execução e esses ajustes podem não chegar ao jogo.

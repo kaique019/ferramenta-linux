@@ -525,12 +525,19 @@ impl App {
                     return Effect::None;
                 }
                 let profile = self.profile_of(&g);
-                let Some(exe) = profile.exe_path.clone().or(g.exe.clone()) else {
-                    self.set_status(Level::Err, "este jogo não tem executável conhecido");
-                    return Effect::None;
+                // jogos do Heroic abrem pelo próprio Heroic (ele cuida do Wine/Proton); um executável definido à mão vence
+                let via_heroic = if profile.exe_path.is_none() { games::heroic_launch(&g, &self.env.home, &crate::util::have) } else { None };
+                let (exe, args) = if let Some((exe, args)) = via_heroic {
+                    (exe, args)
+                } else {
+                    let Some(exe) = profile.exe_path.clone().or(g.exe.clone()) else {
+                        self.set_status(Level::Err, "este jogo não tem executável conhecido (para jogos do Heroic, instale ou abra o Heroic)");
+                        return Effect::None;
+                    };
+                    let st = self.env.store.load().settings;
+                    let args = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
+                    (exe, args)
                 };
-                let st = self.env.store.load().settings;
-                let args = st.custom_games.iter().find(|c| c.exe == exe).map(|c| c.args.clone()).unwrap_or_default();
                 return Effect::Launch(Box::new(LaunchReq { name: g.name, exe, args, profile }));
             }
             _ => {}

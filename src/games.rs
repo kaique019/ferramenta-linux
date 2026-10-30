@@ -142,37 +142,106 @@ pub fn heroic_games(home: &Path) -> Vec<Game> {
     as_user(|| heroic_games_inner(home)).unwrap_or_default()
 }
 
+/// Pastas de configuração do Heroic: instalação normal, Flatpak, Snap e `$XDG_CONFIG_HOME`.
+fn heroic_bases(home: &Path) -> Vec<PathBuf> {
+    let mut v = vec![home.join(".config/heroic"), home.join(".var/app/com.heroicgameslauncher.hgl/config/heroic"), home.join("snap/heroic/current/.config/heroic")];
+    if home == crate::util::home_dir() {
+        v.push(crate::util::config_dir().join("heroic"));
+    }
+    let mut seen = vec![];
+    v.retain(|p| {
+        let fresh = !seen.contains(p);
+        seen.push(p.clone());
+        fresh
+    });
+    v
+}
+
+/// `executable` da Epic vem relativo à pasta de instalação.
+fn absolute_exe(dir: Option<&str>, exe: Option<String>) -> Option<String> {
+    let exe = exe?;
+    if Path::new(&exe).is_absolute() {
+        return Some(exe);
+    }
+    match dir {
+        Some(d) if !exe.split('/').any(|c| c == "..") => Some(Path::new(d).join(exe.trim_start_matches("./")).to_string_lossy().into_owned()),
+        _ => Some(exe),
+    }
+}
+
+/// Aceita a lista tanto em `{ "<chave>": [..] }` quanto solta no topo do arquivo.
+fn json_list(v: Option<serde_json::Value>, key: &str) -> Vec<serde_json::Value> {
+    match v {
+        Some(serde_json::Value::Array(a)) => a,
+        Some(o) => o.get(key).and_then(|x| x.as_array().cloned()).unwrap_or_default(),
+        None => vec![],
+    }
+}
+
 fn heroic_games_inner(home: &Path) -> Vec<Game> {
-    let mut games = vec![];
-    for rel in [".config/heroic", ".var/app/com.heroicgameslauncher.hgl/config/heroic"] {
-        let base = home.join(rel);
+    let mut games: Vec<Game> = vec![];
+    let mut push = |g: Game| {
+        if !games.iter().any(|x| x.id == g.id) {
+            games.push(g);
+        }
+    };
+    for base in heroic_bases(home) {
         if !base.is_dir() {
             continue;
         }
         // Epic: objeto { app_name: { title, install_path, executable, install_size } }
         if let Some(serde_json::Value::Object(m)) = json_file(&base.join("legendaryConfig/legendary/installed.json")) {
             for (app, g) in &m {
-                games.push(Game { id: format!("epic:{app}"), name: s(g, "title").unwrap_or_else(|| app.clone()), source: Source::Epic, install_dir: s(g, "install_path"), exe: s(g, "executable"), size: g.get("install_size").and_then(|v| v.as_u64()), steam_appid: None });
+                let dir = s(g, "install_path");
+                let exe = absolute_exe(dir.as_deref(), s(g, "executable"));
+                push(Game { id: format!("epic:{app}"), name: s(g, "title").unwrap_or_else(|| app.clone()), source: Source::Epic, install_dir: dir, exe, size: g.get("install_size").and_then(|v| v.as_u64()), steam_appid: None });
             }
         }
         // GOG: { installed: [ { appName, install_path } ] }, com os títulos em outro arquivo
-        let titles = json_file(&base.join("store_cache/gog_library.json"));
-        if let Some(list) = json_file(&base.join("gog_store/installed.json")).and_then(|v| v.get("installed").cloned()).and_then(|v| v.as_array().cloned()) {
-            for g in &list {
-                let Some(app) = s(g, "appName") else { continue };
-                let title = titles.as_ref().and_then(|t| t.get("games")?.as_array()?.iter().find(|x| s(x, "app_name").as_deref() == Some(&app)).and_then(|x| s(x, "title")));
-                games.push(Game { id: format!("gog:{app}"), name: title.unwrap_or_else(|| app.clone()), source: Source::Gog, install_dir: s(g, "install_path"), exe: None, size: None, steam_appid: None });
-            }
+        let titles = json_list(json_file(&base.join("store_cache/gog_library.json")), "games");
+        for g in json_list(json_file(&base.join("gog_store/installed.json")), "installed") {
+            let Some(app) = s(&g, "appName").or_else(|| s(&g, "app_name")) else { continue };
+            let title = titles.iter().find(|x| s(x, "app_name").or_else(|| s(x, "appName")).as_deref() == Some(&app)).and_then(|x| s(x, "title"));
+            push(Game { id: format!("gog:{app}"), name: title.unwrap_or_else(|| app.clone()), source: Source::Gog, install_dir: s(&g, "install_path"), exe: None, size: None, steam_appid: None });
         }
         // Avulsos: { games: [ { app_name, title, folder_name, install: { executable } } ] }
-        if let Some(list) = json_file(&base.join("sideload_apps/library.json")).and_then(|v| v.get("games").cloned()).and_then(|v| v.as_array().cloned()) {
-            for g in &list {
-                let Some(app) = s(g, "app_name") else { continue };
-                games.push(Game { id: format!("heroic:{app}"), name: s(g, "title").unwrap_or_else(|| app.clone()), source: Source::Heroic, install_dir: s(g, "folder_name"), exe: g.get("install").and_then(|i| s(i, "executable")), size: None, steam_appid: None });
+        for g in json_list(json_file(&base.join("sideload_apps/library.json")), "games") {
+            let Some(app) = s(&g, "app_name") else { continue };
+            // só os instalados (is_installed ausente conta como instalado: versões antigas não tinham o campo)
+            if g.get("is_installed").and_then(|v| v.as_bool()) == Some(false) {
+                continue;
             }
+            let dir = s(&g, "folder_name");
+            let exe = absolute_exe(dir.as_deref(), g.get("install").and_then(|i| s(i, "executable")));
+            push(Game { id: format!("heroic:{app}"), name: s(&g, "title").unwrap_or_else(|| app.clone()), source: Source::Heroic, install_dir: dir, exe, size: None, steam_appid: None });
         }
     }
     games
+}
+
+/// Como abrir um jogo do Heroic: pelo próprio Heroic (`heroic://launch/<runner>/<app>`), que cuida do
+/// Wine/Proton e do prefixo. Devolve (programa, argumentos), ou `None` se não é jogo do Heroic ou o
+/// Heroic não está instalado.
+pub fn heroic_launch(g: &Game, home: &Path, have: &dyn Fn(&str) -> bool) -> Option<(String, String)> {
+    let runner = match g.source {
+        Source::Epic => "legendary",
+        Source::Gog => "gog",
+        Source::Heroic => "sideload",
+        _ => return None,
+    };
+    let app = g.id.split_once(':')?.1;
+    if app.is_empty() || !app.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return None;
+    }
+    let url = format!("heroic://launch/{runner}/{app}");
+    let flatpak = home.join(".var/app/com.heroicgameslauncher.hgl").is_dir();
+    if have("heroic") {
+        Some(("heroic".into(), format!("--no-gui --no-sandbox {url}")))
+    } else if flatpak && have("flatpak") {
+        Some(("flatpak".into(), format!("run com.heroicgameslauncher.hgl --no-gui --no-sandbox {url}")))
+    } else {
+        None
+    }
 }
 
 /// Lê o essencial de um `.yml` do Lutris (campos simples; não precisa de um parser YAML completo).
@@ -272,6 +341,49 @@ mod tests {
         fs::create_dir_all(h.join(".steam")).unwrap();
         std::os::unix::fs::symlink(h.join(".local/share/Steam"), h.join(".steam/steam")).unwrap();
         assert_eq!(steam_games(h).len(), 1);
+    }
+
+    #[test]
+    fn heroic_is_found_in_flatpak_and_snap_and_epic_exe_becomes_absolute() {
+        let d = tempfile::tempdir().unwrap();
+        let h = d.path();
+        put(h, ".var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary/installed.json", r#"{"Sugar":{"title":"Celeste","install_path":"/g/celeste","executable":"Celeste.exe"}}"#);
+        put(h, "snap/heroic/current/.config/heroic/gog_store/installed.json", r#"[{"appName":"7","install_path":"/g/x"}]"#);
+        let g = heroic_games(h);
+        let celeste = g.iter().find(|g| g.id == "epic:Sugar").unwrap();
+        assert_eq!(celeste.exe.as_deref(), Some("/g/celeste/Celeste.exe"));
+        assert!(g.iter().any(|g| g.id == "gog:7"), "GOG com lista solta no topo do arquivo");
+    }
+
+    #[test]
+    fn uninstalled_sideload_apps_are_skipped_and_ids_are_not_duplicated() {
+        let d = tempfile::tempdir().unwrap();
+        let h = d.path();
+        put(h, ".config/heroic/sideload_apps/library.json", r#"{"games":[{"app_name":"a","title":"A","is_installed":false},{"app_name":"b","title":"B","is_installed":true,"folder_name":"/g/b","install":{"executable":"b.sh"}}]}"#);
+        let g = heroic_games(h);
+        assert_eq!(g.len(), 1);
+        assert_eq!(g[0].exe.as_deref(), Some("/g/b/b.sh"));
+    }
+
+    #[test]
+    fn heroic_games_launch_through_heroic_and_reject_odd_ids() {
+        let d = tempfile::tempdir().unwrap();
+        let mk = |id: &str, source| Game { id: id.into(), name: "x".into(), source, install_dir: None, exe: None, size: None, steam_appid: None };
+        let yes = |_: &str| true;
+        let no = |_: &str| false;
+        let (exe, args) = heroic_launch(&mk("epic:Sugar", Source::Epic), d.path(), &yes).unwrap();
+        assert_eq!((exe.as_str(), args.as_str()), ("heroic", "--no-gui --no-sandbox heroic://launch/legendary/Sugar"));
+        assert!(heroic_launch(&mk("gog:123", Source::Gog), d.path(), &yes).unwrap().1.ends_with("heroic://launch/gog/123"));
+        assert!(heroic_launch(&mk("heroic:x1", Source::Heroic), d.path(), &yes).unwrap().1.ends_with("heroic://launch/sideload/x1"));
+        assert!(heroic_launch(&mk("steam:620", Source::Steam), d.path(), &yes).is_none());
+        assert!(heroic_launch(&mk("epic:a b;rm", Source::Epic), d.path(), &yes).is_none(), "id com caracteres estranhos não vira comando");
+        assert!(heroic_launch(&mk("epic:Sugar", Source::Epic), d.path(), &no).is_none(), "sem Heroic instalado");
+        // Flatpak: só o flatpak existe
+        std::fs::create_dir_all(d.path().join(".var/app/com.heroicgameslauncher.hgl")).unwrap();
+        let only_flatpak = |c: &str| c == "flatpak";
+        let (exe, args) = heroic_launch(&mk("epic:Sugar", Source::Epic), d.path(), &only_flatpak).unwrap();
+        assert_eq!(exe, "flatpak");
+        assert!(args.starts_with("run com.heroicgameslauncher.hgl --no-gui"));
     }
 
     #[test]
