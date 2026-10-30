@@ -94,7 +94,7 @@ pub enum Command {
         /// Lista os presets
         #[arg(long)]
         list: bool,
-        /// Preset a mostrar ou gravar (padrao, claro, contraste, retro, neon)
+        /// Preset a mostrar ou gravar (padrao, claro, contraste, retro, neon, oceano, pinguim, dracula)
         #[arg(long)]
         preset: Option<String>,
         /// Grava o tema completo em theme.json para você editar
